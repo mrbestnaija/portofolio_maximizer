@@ -140,6 +140,59 @@ def test_execute_signal_uses_last_valid_market_row_when_terminal_close_is_nan():
     db.close()
 
 
+def test_execute_signal_applies_high_snr_holding_override(monkeypatch):
+    db = DatabaseManager(":memory:")
+    validator = DummyValidator(DummyValidationResult(True, "EXECUTE", 0.9))
+    engine = PaperTradingEngine(
+        initial_capital=10_000.0,
+        slippage_pct=0.0,
+        transaction_cost_pct=0.0,
+        database_manager=db,
+        signal_validator=validator,
+    )
+    monkeypatch.setenv("MAX_HOLDING_DAYS_CAP", "10")
+
+    signal = {
+        "ticker": "MSFT",
+        "action": "BUY",
+        "confidence": 0.8,
+        "forecast_horizon": 30,
+        "max_holding_days_override": 15,
+    }
+    result = engine.execute_signal(signal, make_market_data(120.0))
+
+    assert result.status == "EXECUTED"
+    assert engine.portfolio.max_holding_days["MSFT"] == 15
+
+    db.close()
+
+
+def test_execute_signal_uses_default_holding_cap_without_override(monkeypatch):
+    db = DatabaseManager(":memory:")
+    validator = DummyValidator(DummyValidationResult(True, "EXECUTE", 0.9))
+    engine = PaperTradingEngine(
+        initial_capital=10_000.0,
+        slippage_pct=0.0,
+        transaction_cost_pct=0.0,
+        database_manager=db,
+        signal_validator=validator,
+    )
+    monkeypatch.setenv("MAX_HOLDING_DAYS_CAP", "10")
+
+    signal = {
+        "ticker": "MSFT",
+        "action": "BUY",
+        "confidence": 0.8,
+        "forecast_horizon": 30,
+    }
+    result = engine.execute_signal(signal, make_market_data(120.0))
+
+    assert result.status == "EXECUTED"
+    assert engine.portfolio.max_holding_days["MSFT"] == 10
+
+    db.close()
+
+
 def test_edge_cost_gate_uses_nested_expected_return_net(monkeypatch):
     db = DatabaseManager(":memory:")
     validator = DummyValidator(DummyValidationResult(True, "EXECUTE", 0.9))

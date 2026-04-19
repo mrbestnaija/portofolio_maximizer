@@ -136,6 +136,10 @@ def test_bridge_merges_run_auto_trader_producer_artifact(tmp_path) -> None:
                 "equity": [{"t": "start", "v": 100.0}, {"t": "end", "v": 101.0}],
                 "equity_realized": [{"t": "start", "v": 100.0}, {"t": "end", "v": 100.5}],
                 "forecaster_health": {"status": {"profit_factor_ok": True}},
+                "canonical_snapshot": {
+                    "schema_version": 2,
+                    "summary": {"ann_roi_pct": 9.86, "unattended_gate": "FAIL", "unattended_ready": False},
+                },
                 "preprocess_health": {
                     "status": "WARN",
                     "summary": {"snapshots": 1, "production_ok_runs": 0},
@@ -166,6 +170,7 @@ def test_bridge_merges_run_auto_trader_producer_artifact(tmp_path) -> None:
     assert merged["routing"]["ts_signals"] == 7
     assert merged["equity"][-1]["v"] == 101.0
     assert merged["forecaster_health"]["status"]["profit_factor_ok"] is True
+    assert merged["canonical_snapshot"]["summary"]["ann_roi_pct"] == pytest.approx(9.86)
     assert merged["preprocess_health"]["latest"]["quality_tag"] == "HIGH_IMPUTE"
     assert merged["orchestration_health"]["latest"]["oos_source"] == "latest_metrics"
 

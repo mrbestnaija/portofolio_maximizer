@@ -2572,6 +2572,25 @@ def _coerce_open_position_shares(value: Any) -> int:
         return 0
 
 
+def _count_open_lots_for_ticker(trading_engine: PaperTradingEngine, ticker: str) -> int:
+    """Count positive-remaining entry lots for a ticker."""
+    try:
+        portfolio = getattr(trading_engine, "portfolio", None)
+        entry_lots = getattr(portfolio, "entry_lots", {}) if portfolio is not None else {}
+        lots = entry_lots.get(ticker, []) if isinstance(entry_lots, dict) else []
+    except Exception:
+        lots = []
+
+    count = 0
+    for lot in lots:
+        if not isinstance(lot, dict):
+            continue
+        remaining = _coerce_open_position_shares(lot.get("remaining_shares"))
+        if remaining > 0:
+            count += 1
+    return count
+
+
 def _execute_signal(
     router: SignalRouter,
     trading_engine: PaperTradingEngine,
@@ -2590,6 +2609,7 @@ def _execute_signal(
     barbell_cfg: Optional[BarbellConfig] = None,
     proof_mode: bool = False,
     is_intraday: bool = False,
+    max_open_lots_per_ticker: Optional[int] = None,
 ) -> Optional[Dict]:
     """Route signals and push the primary decision through the execution engine."""
     bundle = router.route_signal(
@@ -2607,19 +2627,43 @@ def _execute_signal(
         logger.info("No actionable signal produced for %s", ticker)
         return None
 
-    # Anti-pyramiding: one open leg per ticker. Extra BUYs into an existing long create
-    # additional open legs that each need a CLOSE to count toward THIN_LINKAGE, delaying
-    # round-trip accumulation. Demote to HOLD when position already open.
+    # Anti-pyramiding: one open leg per ticker by default. Extra BUYs into an existing
+    # long create additional open legs that each need a CLOSE to count toward THIN_LINKAGE,
+    # delaying round-trip accumulation. Demote to HOLD when the open-lot limit is reached.
     _current_position = _coerce_open_position_shares(
         getattr(getattr(trading_engine, "portfolio", None), "positions", {}).get(ticker, 0)
     )
-    if _current_position > 0 and str(primary.get("action", "")).upper() == "BUY":
+    _open_lot_count = _count_open_lots_for_ticker(trading_engine, ticker)
+    if _open_lot_count <= 0 and _current_position > 0:
+        _open_lot_count = 1
+    _lot_limit = None
+    try:
+        if max_open_lots_per_ticker is not None:
+            _lot_limit = max(1, int(max_open_lots_per_ticker))
+    except (TypeError, ValueError):
+        _lot_limit = None
+    if (
+        _lot_limit is not None
+        and _open_lot_count >= _lot_limit
+        and str(primary.get("action", "")).upper() == "BUY"
+    ):
         logger.info(
-            "[ANTI_PYRAMID] Demoting BUY to HOLD for %s — already hold %s shares. "
+            "[ANTI_PYRAMID] Demoting BUY to HOLD for %s — open_lots=%s limit=%s. "
             "One open leg per ticker enforced.",
-            ticker, _current_position,
+            ticker, _open_lot_count, _lot_limit,
         )
-        return None
+        primary = dict(primary)
+        primary["action"] = "HOLD"
+        primary["reason"] = "MAX_LOTS_REACHED"
+        primary["execution_policy_blocked"] = True
+        primary["execution_policy_reason_codes"] = ["MAX_LOTS_REACHED"]
+        primary["execution_policy_detail"] = (
+            f"Anti-pyramiding limit reached: open_lots={_open_lot_count} >= limit={_lot_limit}."
+        )
+        provenance = dict(primary.get("provenance") or {})
+        provenance["hold_reason"] = "MAX_LOTS_REACHED"
+        provenance["execution_policy_reason_codes"] = ["MAX_LOTS_REACHED"]
+        primary["provenance"] = provenance
 
     primary_provenance = primary.get("provenance") if isinstance(primary.get("provenance"), dict) else {}
     decision_context = (
@@ -2651,11 +2695,14 @@ def _execute_signal(
         if isinstance(raw_signal_id, str) and raw_signal_id.strip():
             primary_payload["ts_signal_id"] = raw_signal_id.strip()
 
-    # High-conviction signals (SNR ≥ 2.0) get a longer runway so developing winners
-    # are not prematurely TIME_EXIT'd before reaching the extended target.
+    # High-conviction signals (SNR ≥ 2.0) get a longer lifecycle runway so developing
+    # winners are not prematurely TIME_EXIT'd before reaching the extended target.
+    # Keep the model forecast horizon intact for auditability, but add an explicit
+    # hold override so the engine can distinguish high-conviction runway from the
+    # default THIN_LINKAGE-friendly cap.
     try:
         if routing_snr is not None and float(routing_snr) >= 2.0:
-            primary_payload.setdefault("forecast_horizon", 15)
+            primary_payload["max_holding_days_override"] = 15
     except (TypeError, ValueError):
         pass
 
@@ -2783,6 +2830,8 @@ def _execute_signal(
             "execution_mode": execution_mode,
             "execution_policy_blocked": True,
             "admission_override_reason_codes": reason_codes,
+            "execution_policy_detail": primary_payload.get("execution_policy_detail"),
+            "execution_policy_reason_codes": reason_codes,
             "evidence_source_classification": "producer-native",
             "signal_id": primary_payload.get("signal_id"),
             "ts_signal_id": primary_payload.get("ts_signal_id"),
@@ -2833,6 +2882,8 @@ def _execute_signal(
             "execution_mode": execution_mode,
             "signal_id": primary_payload.get("signal_id"),
             "ts_signal_id": primary_payload.get("ts_signal_id"),
+            "execution_policy_detail": primary_payload.get("execution_policy_detail"),
+            "execution_policy_reason_codes": list(primary_payload.get("execution_policy_reason_codes") or []),
             "action": routed_action,
             "routed_action": routed_action,
             "executed_action": None,
@@ -3595,6 +3646,13 @@ def main(
             post_preprocess_cfg = validation_cfg.get("post_preprocess") or {}
 
     ts_cfg = dict(routing_cfg.get("time_series") or {})
+    position_mgmt_cfg = routing_cfg.get("position_management") or {}
+    try:
+        max_open_lots_per_ticker = int(position_mgmt_cfg.get("max_open_lots_per_ticker", 1) or 1)
+    except (TypeError, ValueError):
+        max_open_lots_per_ticker = 1
+    if max_open_lots_per_ticker <= 0:
+        max_open_lots_per_ticker = 1
     strict_ts = str(os.getenv("PMX_PROOF_STRICT_THRESHOLDS") or "0") == "1"
     if proof_mode and strict_ts:
         # Defaults chosen to reduce churn: higher confidence + higher min-return
@@ -3985,6 +4043,7 @@ def main(
                 barbell_cfg=barbell_cfg,
                 proof_mode=proof_mode,
                 is_intraday=interval is not None and interval != "1d",
+                max_open_lots_per_ticker=max_open_lots_per_ticker,
             )
 
             if execution_report:

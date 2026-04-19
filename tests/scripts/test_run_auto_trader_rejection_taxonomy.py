@@ -479,6 +479,271 @@ def test_execute_signal_surfaces_forced_exit_override_without_clobbering_routed_
     assert report["exit_reason"] == "TIME_EXIT"
 
 
+def test_execute_signal_blocks_buy_when_max_open_lots_reached() -> None:
+    router = MagicMock()
+    router.route_signal.return_value = SignalBundle(
+        primary_signal={
+            "ticker": "AAPL",
+            "action": "BUY",
+            "confidence": 0.71,
+            "expected_return": 0.0025,
+            "expected_return_net": 0.0015,
+            "gross_trade_return": 0.0025,
+            "net_trade_return": 0.0015,
+            "roundtrip_cost_fraction": 0.0010,
+            "roundtrip_cost_bps": 10.0,
+            "risk_score": 0.24,
+            "risk_level": "low",
+            "signal_type": "TIME_SERIES",
+            "source": "TIME_SERIES",
+            "ts_signal_id": "ts_AAPL_20260409T093000Z_dead_0002",
+            "provenance": {
+                "decision_context": {
+                    "signal_to_noise": 2.4,
+                    "expected_return_net": 0.0015,
+                    "gross_trade_return": 0.0025,
+                    "net_trade_return": 0.0015,
+                    "roundtrip_cost_fraction": 0.0010,
+                    "roundtrip_cost_bps": 10.0,
+                },
+            },
+        }
+    )
+
+    trading_engine = MagicMock()
+    trading_engine.portfolio = SimpleNamespace(
+        positions={"AAPL": 3},
+        entry_lots={
+            "AAPL": [
+                {"trade_id": 101, "action": "BUY", "remaining_shares": 3},
+            ]
+        },
+    )
+    trading_engine.execute_signal.return_value = SimpleNamespace(
+        status="EXECUTED",
+        reason=None,
+        validation_warnings=[],
+        trade=None,
+        portfolio=None,
+    )
+
+    report = _execute_signal(
+        router=router,
+        trading_engine=trading_engine,
+        ticker="AAPL",
+        forecast_bundle={"horizon": 30},
+        current_price=100.0,
+        market_data=_market_frame(),
+        max_open_lots_per_ticker=1,
+    )
+
+    assert report is not None
+    assert report["status"] == "REJECTED"
+    assert report["action"] == "HOLD"
+    assert report["routed_action"] == "HOLD"
+    assert report["execution_policy_blocked"] is True
+    assert report["execution_policy_reason_codes"] == ["MAX_LOTS_REACHED"]
+    assert "open_lots=1" in report["execution_policy_detail"]
+    trading_engine.execute_signal.assert_not_called()
+
+
+def test_execute_signal_allows_sell_when_open_lot_exists() -> None:
+    router = MagicMock()
+    router.route_signal.return_value = SignalBundle(
+        primary_signal={
+            "ticker": "AAPL",
+            "action": "SELL",
+            "confidence": 0.66,
+            "expected_return": 0.0025,
+            "expected_return_net": 0.0015,
+            "gross_trade_return": 0.0025,
+            "net_trade_return": 0.0015,
+            "roundtrip_cost_fraction": 0.0010,
+            "roundtrip_cost_bps": 10.0,
+            "risk_score": 0.24,
+            "risk_level": "low",
+            "signal_type": "TIME_SERIES",
+            "source": "TIME_SERIES",
+            "ts_signal_id": "ts_AAPL_20260409T093000Z_dead_0003",
+            "provenance": {
+                "decision_context": {
+                    "signal_to_noise": 2.4,
+                    "expected_return_net": 0.0015,
+                    "gross_trade_return": 0.0025,
+                    "net_trade_return": 0.0015,
+                    "roundtrip_cost_fraction": 0.0010,
+                    "roundtrip_cost_bps": 10.0,
+                },
+            },
+        }
+    )
+
+    trading_engine = MagicMock()
+    trading_engine.portfolio = SimpleNamespace(
+        positions={"AAPL": 3},
+        entry_lots={
+            "AAPL": [
+                {"trade_id": 101, "action": "BUY", "remaining_shares": 3},
+            ]
+        },
+    )
+    trading_engine.execute_signal.return_value = SimpleNamespace(
+        status="EXECUTED",
+        reason=None,
+        validation_warnings=[],
+        trade=SimpleNamespace(
+            shares=1,
+            action="SELL",
+            entry_price=100.25,
+            timestamp=pd.Timestamp("2026-04-09T09:00:00+00:00").to_pydatetime(),
+        ),
+        portfolio=SimpleNamespace(total_value=25001.0),
+    )
+
+    report = _execute_signal(
+        router=router,
+        trading_engine=trading_engine,
+        ticker="AAPL",
+        forecast_bundle={"horizon": 30},
+        current_price=100.0,
+        market_data=_market_frame(),
+        max_open_lots_per_ticker=1,
+    )
+
+    assert report is not None
+    assert report["status"] == "EXECUTED"
+    assert report["action"] == "SELL"
+    assert report["routed_action"] == "SELL"
+    trading_engine.execute_signal.assert_called_once()
+
+
+def test_execute_signal_sets_holding_override_for_high_snr_signals() -> None:
+    router = MagicMock()
+    router.route_signal.return_value = SignalBundle(
+        primary_signal={
+            "ticker": "NVDA",
+            "action": "BUY",
+            "confidence": 0.74,
+            "forecast_horizon": 30,
+            "expected_return": 0.0035,
+            "expected_return_net": 0.0024,
+            "gross_trade_return": 0.0035,
+            "net_trade_return": 0.0024,
+            "roundtrip_cost_fraction": 0.0011,
+            "roundtrip_cost_bps": 11.0,
+            "risk_score": 0.22,
+            "risk_level": "low",
+            "signal_type": "TIME_SERIES",
+            "source": "TIME_SERIES",
+            "ts_signal_id": "ts_NVDA_20260409T093000Z_dead_0004",
+            "provenance": {
+                "decision_context": {
+                    "signal_to_noise": 2.4,
+                    "expected_return_net": 0.0024,
+                    "gross_trade_return": 0.0035,
+                    "net_trade_return": 0.0024,
+                    "roundtrip_cost_fraction": 0.0011,
+                    "roundtrip_cost_bps": 11.0,
+                },
+            },
+        }
+    )
+
+    trading_engine = MagicMock()
+    trading_engine.portfolio = SimpleNamespace(positions={}, entry_lots={})
+    trading_engine.execute_signal.return_value = SimpleNamespace(
+        status="EXECUTED",
+        reason=None,
+        validation_warnings=[],
+        trade=SimpleNamespace(
+            shares=1,
+            action="BUY",
+            entry_price=100.25,
+            timestamp=pd.Timestamp("2026-04-09T09:00:00+00:00").to_pydatetime(),
+        ),
+        portfolio=SimpleNamespace(total_value=25001.0),
+    )
+
+    report = _execute_signal(
+        router=router,
+        trading_engine=trading_engine,
+        ticker="NVDA",
+        forecast_bundle={"horizon": 30},
+        current_price=100.0,
+        market_data=_market_frame(),
+        max_open_lots_per_ticker=1,
+    )
+
+    assert report is not None
+    assert report["status"] == "EXECUTED"
+    call_signal = trading_engine.execute_signal.call_args.args[0]
+    assert call_signal["max_holding_days_override"] == 15
+    assert call_signal["forecast_horizon"] == 30
+
+
+def test_execute_signal_leaves_holding_override_off_for_low_snr_signals() -> None:
+    router = MagicMock()
+    router.route_signal.return_value = SignalBundle(
+        primary_signal={
+            "ticker": "MSFT",
+            "action": "BUY",
+            "confidence": 0.64,
+            "forecast_horizon": 30,
+            "expected_return": 0.0035,
+            "expected_return_net": 0.0024,
+            "gross_trade_return": 0.0035,
+            "net_trade_return": 0.0024,
+            "roundtrip_cost_fraction": 0.0011,
+            "roundtrip_cost_bps": 11.0,
+            "risk_score": 0.22,
+            "risk_level": "low",
+            "signal_type": "TIME_SERIES",
+            "source": "TIME_SERIES",
+            "ts_signal_id": "ts_MSFT_20260409T093000Z_dead_0005",
+            "provenance": {
+                "decision_context": {
+                    "signal_to_noise": 1.2,
+                    "expected_return_net": 0.0024,
+                    "gross_trade_return": 0.0035,
+                    "net_trade_return": 0.0024,
+                    "roundtrip_cost_fraction": 0.0011,
+                    "roundtrip_cost_bps": 11.0,
+                },
+            },
+        }
+    )
+
+    trading_engine = MagicMock()
+    trading_engine.portfolio = SimpleNamespace(positions={}, entry_lots={})
+    trading_engine.execute_signal.return_value = SimpleNamespace(
+        status="EXECUTED",
+        reason=None,
+        validation_warnings=[],
+        trade=SimpleNamespace(
+            shares=1,
+            action="BUY",
+            entry_price=100.25,
+            timestamp=pd.Timestamp("2026-04-09T09:00:00+00:00").to_pydatetime(),
+        ),
+        portfolio=SimpleNamespace(total_value=25001.0),
+    )
+
+    report = _execute_signal(
+        router=router,
+        trading_engine=trading_engine,
+        ticker="MSFT",
+        forecast_bundle={"horizon": 30},
+        current_price=100.0,
+        market_data=_market_frame(),
+        max_open_lots_per_ticker=1,
+    )
+
+    assert report is not None
+    assert report["status"] == "EXECUTED"
+    call_signal = trading_engine.execute_signal.call_args.args[0]
+    assert "max_holding_days_override" not in call_signal
+
+
 def test_attach_signal_context_keeps_routed_action_separate_from_executed_action() -> None:
     with tempfile.TemporaryDirectory() as td:
         tmp_path = Path(td)

@@ -176,6 +176,8 @@ def apply_reallocation(
 
     promotions = plan.get("promotions") or []
     demotions = plan.get("demotions") or []
+    rollout = plan.get("_rollout") if isinstance(plan.get("_rollout"), dict) else {}
+    live_apply_allowed = bool(rollout.get("live_apply_allowed", True))
 
     applied_promotions: List[Dict] = []
     applied_demotions: List[Dict] = []
@@ -195,6 +197,12 @@ def apply_reallocation(
         if not ticker:
             continue
         eg = _check_evidence_gate(ticker, plan_rows.get(ticker), constraints)
+        if not live_apply_allowed:
+            eg = {
+                **eg,
+                "passed": False,
+                "blocking_reasons": sorted({*eg["blocking_reasons"], "LIVE_APPLY_BLOCKED"}),
+            }
         evidence_gate[ticker] = eg
         if not eg["passed"]:
             skipped_moves.append({**move, "skip_reason": eg["blocking_reasons"]})

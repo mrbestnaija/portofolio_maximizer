@@ -36,6 +36,17 @@ DEFAULT_OUTPUT = ROOT / "logs" / "canonical_snapshot_latest.json"
 SCHEMA_VERSION = 2
 
 
+def _gate_artifact_candidates() -> tuple[Path, Path]:
+    return (
+        ROOT / "logs" / "audit_gate" / "production_gate_latest.json",
+        ROOT / "logs" / "production_gate_latest.json",
+    )
+
+
+def _ui_metrics_summary_path() -> Path:
+    return ROOT / "visualizations" / "performance" / "metrics_summary.json"
+
+
 def _query_closed_pnl(conn: sqlite3.Connection) -> Dict[str, Any]:
     """Closed PnL metrics from production_closed_trades (canonical view)."""
     row = conn.execute("""
@@ -103,13 +114,17 @@ def _query_open_risk(conn: sqlite3.Connection) -> Dict[str, Any]:
 
 def _read_gate_artifact() -> Optional[Dict[str, Any]]:
     """Read production_gate_latest.json if present (not always up-to-date)."""
-    gate_path = ROOT / "logs" / "production_gate_latest.json"
-    if not gate_path.exists():
-        return None
-    try:
-        return json.loads(gate_path.read_text(encoding="utf-8"))
-    except Exception:
-        return None
+    for gate_path in _gate_artifact_candidates():
+        if not gate_path.exists():
+            continue
+        try:
+            payload = json.loads(gate_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if isinstance(payload, dict):
+            payload.setdefault("_artifact_path", str(gate_path))
+            return payload
+    return None
 
 
 def _run_utilization(db_path: Path, capital: float) -> Optional[Dict[str, Any]]:
@@ -138,13 +153,14 @@ def emit_snapshot(db_path: Path) -> Dict[str, Any]:
     gate = _read_gate_artifact()
     gate_summary = None
     if gate:
+        gate_path = gate.get("_artifact_path") or str(_gate_artifact_candidates()[0])
         gate_summary = {
             "phase3_ready": gate.get("phase3_ready"),
             "posture": gate.get("posture"),
             "phase3_reason": gate.get("phase3_reason"),
             "matched": gate.get("readiness", {}).get("outcome_matched"),
             "eligible": gate.get("readiness", {}).get("outcome_eligible"),
-            "artifact_path": str(ROOT / "logs" / "production_gate_latest.json"),
+            "artifact_path": str(gate_path),
         }
 
     # Unattended gate status
@@ -171,6 +187,19 @@ def emit_snapshot(db_path: Path) -> Dict[str, Any]:
         "schema_version": SCHEMA_VERSION,
         "generated_utc": datetime.now(timezone.utc).isoformat(),
         "db_path": str(db_path),
+        "source_contract": {
+            "canonical": {
+                "closed_pnl": "production_closed_trades",
+                "capital": "portfolio_cash_state.initial_capital",
+                "utilization": "scripts.compute_capital_utilization.compute_utilization",
+                "open_risk": "trade_executions WHERE is_close=0",
+                "gate_artifact": str(_gate_artifact_candidates()[0]),
+                "unattended_gate": "scripts/institutional_unattended_gate.py --json",
+            },
+            "ui_only": {
+                "metrics_summary": str(_ui_metrics_summary_path()),
+            },
+        },
         # ── Canonical metric sections ──
         "closed_pnl": pnl,
         "capital": cap,

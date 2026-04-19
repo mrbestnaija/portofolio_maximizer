@@ -77,6 +77,12 @@ signal_routing:
       include_route_type: true
       include_fill_timestamp: true
 
+  position_management:
+    # Anti-pyramiding guardrail: a ticker may have at most one open lot before
+    # new BUYs are demoted to HOLD. This preserves THIN_LINKAGE accumulation and
+    # avoids repeated opens delaying close-linkage evidence.
+    max_open_lots_per_ticker: 1
+
   # Deprecated routing mode hint (currently no-op; runtime derives mode from active flags).
   routing_mode: "TIME_SERIES_PRIMARY_LLM_FALLBACK"  # Options:
   # - TIME_SERIES_PRIMARY_LLM_FALLBACK (default)

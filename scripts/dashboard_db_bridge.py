@@ -2047,7 +2047,7 @@ def _merge_dashboard_producer_artifact(
 
     # The bridge remains the canonical dashboard writer, but it still reads a
     # few runtime-only fields from the latest auto-trader snapshot.
-    for key in ("latency", "routing", "equity", "equity_realized", "forecaster_health", "orchestration_health", "preprocess_health", "regime", "notes"):
+    for key in ("latency", "routing", "equity", "equity_realized", "forecaster_health", "orchestration_health", "preprocess_health", "regime", "notes", "canonical_snapshot"):
         value = existing.get(key)
         if value is None:
             continue

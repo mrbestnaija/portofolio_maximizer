@@ -73,6 +73,7 @@ class Trade:
     stop_loss: Optional[float] = None
     target_price: Optional[float] = None
     forecast_horizon: Optional[int] = None
+    max_holding_days_override: Optional[int] = None
     exit_reason: Optional[str] = None
     mid_price: Optional[float] = None
     mid_slippage_bps: Optional[float] = None
@@ -813,6 +814,15 @@ class PaperTradingEngine:
             forecast_horizon = int(horizon_raw) if horizon_raw is not None else None
         except (TypeError, ValueError):
             forecast_horizon = None
+        max_holding_days_override_raw = signal.get("max_holding_days_override")
+        try:
+            max_holding_days_override = (
+                int(max_holding_days_override_raw)
+                if max_holding_days_override_raw is not None
+                else None
+            )
+        except (TypeError, ValueError):
+            max_holding_days_override = None
 
         asset_class = _infer_asset_class_from_ticker(ticker)
         trade = Trade(
@@ -830,6 +840,7 @@ class PaperTradingEngine:
             stop_loss=signal.get("stop_loss"),
             target_price=signal.get("target_price"),
             forecast_horizon=forecast_horizon,
+            max_holding_days_override=max_holding_days_override,
             exit_reason=signal.get("exit_reason") if forced_exit_reason else None,
             data_source=data_source,
             execution_mode=execution_mode,
@@ -1448,9 +1459,17 @@ class PaperTradingEngine:
                 except (TypeError, ValueError):
                     horizon = None
                 if horizon is not None and horizon > 0:
-                    # Cap max holding. High-SNR signals may pass forecast_horizon=15
-                    # from run_auto_trader.py; default cap raised to 15 to allow them runway.
-                    cap = int(os.getenv("MAX_HOLDING_DAYS_CAP", "15"))
+                    # Cap max holding. High-SNR signals may supply a separate override
+                    # from run_auto_trader.py; keep the baseline cap tighter so only
+                    # high-conviction names get the longer runway.
+                    cap = int(os.getenv("MAX_HOLDING_DAYS_CAP", "10"))
+                    override = getattr(trade, "max_holding_days_override", None)
+                    try:
+                        override_i = int(override) if override is not None else None
+                    except (TypeError, ValueError):
+                        override_i = None
+                    if override_i is not None and override_i > 0:
+                        cap = max(cap, override_i)
                     new_portfolio.max_holding_days[trade.ticker] = min(horizon, cap)
 
         # Update total value

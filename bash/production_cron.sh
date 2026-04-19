@@ -39,6 +39,11 @@ run_with_logging() {
   } >> "${LOG_FILE}" 2>&1
 }
 
+emit_canonical_snapshot() {
+  run_with_logging "emit_canonical_snapshot: emit_canonical_snapshot.py" \
+    "${PYTHON_BIN}" scripts/emit_canonical_snapshot.py
+}
+
 sanitize_forecast_audits() {
   local forecast_audit_dir="${CRON_FORECAST_AUDIT_DIR:-logs/forecast_audits/production}"
   local forecast_eval_audit_dir="${CRON_FORECAST_EVAL_AUDIT_DIR:-logs/forecast_audits/production_eval}"
@@ -76,6 +81,9 @@ case "${TASK}" in
     # scripts/run_auto_trader.py and config/pipeline_config.yml.
     run_with_logging "auto_trader: run_auto_trader.py" \
       "${PYTHON_BIN}" scripts/run_auto_trader.py "$@"
+    if ! emit_canonical_snapshot; then
+      echo "[CRON] emit_canonical_snapshot failed after auto_trader." >&2
+    fi
     ;;
 
   auto_trader_core)
@@ -130,6 +138,9 @@ PY
     fi
     run_with_logging "auto_trader_core: run_auto_trader.py (tickers=${CORE_TICKERS})" \
       "${PYTHON_BIN}" scripts/run_auto_trader.py --tickers "${CORE_TICKERS}" "$@"
+    if ! emit_canonical_snapshot; then
+      echo "[CRON] emit_canonical_snapshot failed after auto_trader_core." >&2
+    fi
     ;;
 
   sanitize_forecast_audits)

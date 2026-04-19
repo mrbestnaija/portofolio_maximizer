@@ -12,6 +12,7 @@ Inputs (all optional, best-effort):
   - logs/automation/sleeve_summary.json
   - logs/automation/sleeve_promotion_plan.json
   - logs/automation/nav_rebalance_plan_latest.json
+  - logs/canonical_snapshot_latest.json
   - logs/automation/config_proposals.json
   - best cached strategy config from strategy optimization
 
@@ -91,6 +92,12 @@ def _load_json(path: Path) -> Optional[Dict[str, Any]]:
     help="Path to nav_rebalance_plan JSON emitted by build_nav_rebalance_plan.py.",
 )
 @click.option(
+    "--canonical-snapshot-path",
+    default="logs/canonical_snapshot_latest.json",
+    show_default=True,
+    help="Path to canonical_snapshot JSON emitted by emit_canonical_snapshot.py.",
+)
+@click.option(
     "--config-proposals-path",
     default="logs/automation/config_proposals.json",
     show_default=True,
@@ -110,6 +117,7 @@ def main(
     sleeve_summary_path: str,
     sleeve_plan_path: str,
     nav_rebalance_path: str,
+    canonical_snapshot_path: str,
     config_proposals_path: str,
     output: str,
 ) -> None:
@@ -120,6 +128,7 @@ def main(
     sleeve_summary = _load_json(ROOT_PATH / sleeve_summary_path)
     sleeve_plan = _load_json(ROOT_PATH / sleeve_plan_path)
     nav_rebalance = _load_json(ROOT_PATH / nav_rebalance_path)
+    canonical_snapshot = _load_json(ROOT_PATH / canonical_snapshot_path)
     config_proposals = _load_json(ROOT_PATH / config_proposals_path)
 
     # Best cached strategy configuration (generic higher-order hyperopt output).
@@ -147,6 +156,7 @@ def main(
             "sleeve_summary": sleeve_summary,
             "sleeve_promotion_plan": sleeve_plan,
             "nav_rebalance_plan": nav_rebalance,
+            "canonical_snapshot": canonical_snapshot,
             "config_proposals": config_proposals,
         },
         "models": {

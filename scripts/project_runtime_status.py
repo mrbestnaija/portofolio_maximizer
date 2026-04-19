@@ -43,6 +43,7 @@ VALID_EXEC_HOSTS = {"sandbox", "gateway", "node"}
 VALID_SANDBOX_MODES_FOR_SANDBOX_HOST = {"non-main", "all"}
 DEFAULT_DASHBOARD_PATH = PROJECT_ROOT / "visualizations" / "dashboard_data.json"
 DEFAULT_PRODUCTION_GATE_ARTIFACT_PATH = PROJECT_ROOT / "logs" / "audit_gate" / "production_gate_latest.json"
+DEFAULT_CANONICAL_SNAPSHOT_PATH = PROJECT_ROOT / "logs" / "canonical_snapshot_latest.json"
 DEFAULT_PERSISTENCE_STATUS_PATH = PROJECT_ROOT / "logs" / "persistence_manager_status.json"
 _PRODUCTION_GATE_SEMANTICS_RE = re.compile(r"semantics=([A-Z_]+)")
 
@@ -312,6 +313,65 @@ def _strict_dashboard_payload_check() -> dict[str, Any]:
         age_seconds=report.get("age_seconds"),
         freshness_threshold_seconds=report.get("freshness_threshold_seconds"),
         missing_keys=report.get("missing_keys", []),
+    )
+
+
+def _strict_canonical_snapshot_check() -> dict[str, Any]:
+    payload, err = _read_json_file(DEFAULT_CANONICAL_SNAPSHOT_PATH)
+    errors: list[str] = []
+    if err:
+        errors.append(err)
+
+    schema_version = int(payload.get("schema_version") or 0) if payload else 0
+    if schema_version < 2:
+        errors.append("invalid_schema_version")
+
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    utilization = payload.get("utilization") if isinstance(payload.get("utilization"), dict) else {}
+    source_contract = payload.get("source_contract") if isinstance(payload.get("source_contract"), dict) else {}
+    gate = payload.get("gate") if isinstance(payload.get("gate"), dict) else {}
+
+    ann_roi = summary.get("ann_roi_pct")
+    if ann_roi is None and utilization:
+        ann_roi = utilization.get("roi_ann_pct")
+    if ann_roi is None:
+        errors.append("missing_roi_ann_pct")
+
+    if summary.get("unattended_gate") is None:
+        errors.append("missing_unattended_gate")
+    if summary.get("unattended_ready") is None:
+        errors.append("missing_unattended_ready")
+    if not source_contract:
+        errors.append("missing_source_contract")
+    else:
+        canonical_contract = source_contract.get("canonical") if isinstance(source_contract.get("canonical"), dict) else {}
+        ui_only_contract = source_contract.get("ui_only") if isinstance(source_contract.get("ui_only"), dict) else {}
+        if not canonical_contract:
+            errors.append("missing_source_contract.canonical")
+        if not ui_only_contract:
+            errors.append("missing_source_contract.ui_only")
+
+    ann_roi_value = ann_roi
+
+    return _make_check(
+        "strict_canonical_snapshot",
+        ok=not errors,
+        returncode=0 if not errors else 1,
+        command=f"validate {DEFAULT_CANONICAL_SNAPSHOT_PATH.name}",
+        stdout=(
+            f"schema_version={schema_version} "
+            f"ann_roi_pct={ann_roi_value} "
+            f"unattended_gate={summary.get('unattended_gate') if summary else None} "
+            f"posture={gate.get('posture') if gate else None}"
+        ),
+        stderr="; ".join(errors),
+        schema_version=schema_version,
+        ann_roi_pct=ann_roi_value,
+        gap_to_hurdle_pp=summary.get("gap_to_hurdle_pp") if summary else None,
+        unattended_gate=summary.get("unattended_gate") if summary else None,
+        unattended_ready=summary.get("unattended_ready") if summary else None,
+        gate_posture=gate.get("posture") if gate else None,
+        source_contract_present=bool(source_contract),
     )
 
 
@@ -627,6 +687,7 @@ def collect_runtime_status(*, timeout_seconds: float = 90.0, strict: bool = Fals
         strict_checks = [
             _strict_production_gate_check(production_gate_check),
             _strict_dashboard_payload_check(),
+            _strict_canonical_snapshot_check(),
             _strict_persistence_manager_status_check(),
             _collect_observability_stack_check(timeout_seconds=timeout_seconds),
         ]

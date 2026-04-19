@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+import scripts.emit_canonical_snapshot as mod
 from scripts.emit_canonical_snapshot import emit_snapshot, SCHEMA_VERSION
 
 
@@ -94,7 +95,7 @@ class TestCanonicalSnapshot:
         """All top-level canonical keys must be present."""
         snapshot = emit_snapshot(minimal_db)
         required = {"schema_version", "generated_utc", "closed_pnl", "capital",
-                    "open_risk", "utilization", "summary"}
+                    "open_risk", "utilization", "summary", "source_contract"}
         missing = required - set(snapshot.keys())
         assert not missing, f"Missing canonical keys: {missing}"
 
@@ -144,3 +145,35 @@ class TestCanonicalSnapshot:
         out_path.write_text(json.dumps(snapshot, indent=2), encoding="utf-8")
         reloaded = json.loads(out_path.read_text(encoding="utf-8"))
         assert reloaded["schema_version"] == SCHEMA_VERSION
+
+    def test_gate_artifact_prefers_audit_gate_path(self, minimal_db, tmp_path, monkeypatch):
+        """The canonical snapshot must read the audit_gate artifact path first."""
+        repo_root = tmp_path / "repo"
+        audit_gate = repo_root / "logs" / "audit_gate"
+        legacy_gate = repo_root / "logs"
+        audit_gate.mkdir(parents=True, exist_ok=True)
+        legacy_gate.mkdir(parents=True, exist_ok=True)
+        (legacy_gate / "production_gate_latest.json").write_text(
+            json.dumps({"posture": "LEGACY_ONLY"}),
+            encoding="utf-8",
+        )
+        (audit_gate / "production_gate_latest.json").write_text(
+            json.dumps({"posture": "AUDIT_GATE", "phase3_ready": True}),
+            encoding="utf-8",
+        )
+
+        monkeypatch.setattr(mod, "ROOT", repo_root)
+        monkeypatch.setattr(
+            mod,
+            "_run_utilization",
+            lambda db_path, capital: {"roi_ann_pct": 9.86, "trades_per_day": 0.5, "deployment_pct": 1.83},
+        )
+
+        snapshot = mod.emit_snapshot(minimal_db)
+        assert snapshot["gate"]["artifact_path"] == str(audit_gate / "production_gate_latest.json")
+        assert snapshot["source_contract"]["canonical"]["gate_artifact"] == str(
+            audit_gate / "production_gate_latest.json"
+        )
+        assert Path(snapshot["source_contract"]["ui_only"]["metrics_summary"]).as_posix().endswith(
+            "visualizations/performance/metrics_summary.json"
+        )
