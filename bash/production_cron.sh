@@ -44,6 +44,14 @@ emit_canonical_snapshot() {
     "${PYTHON_BIN}" scripts/emit_canonical_snapshot.py
 }
 
+reconcile_platt_outcomes() {
+  # Write 'outcome' back into quant_validation.jsonl for every closed trade
+  # that has a matching JSONL entry.  Must run after every auto_trader cycle
+  # so Platt calibration pairs accumulate in real-time, not just overnight.
+  run_with_logging "reconcile_platt_outcomes: update_platt_outcomes.py" \
+    "${PYTHON_BIN}" scripts/update_platt_outcomes.py || true
+}
+
 sanitize_forecast_audits() {
   local forecast_audit_dir="${CRON_FORECAST_AUDIT_DIR:-logs/forecast_audits/production}"
   local forecast_eval_audit_dir="${CRON_FORECAST_EVAL_AUDIT_DIR:-logs/forecast_audits/production_eval}"
@@ -81,6 +89,7 @@ case "${TASK}" in
     # scripts/run_auto_trader.py and config/pipeline_config.yml.
     run_with_logging "auto_trader: run_auto_trader.py" \
       "${PYTHON_BIN}" scripts/run_auto_trader.py "$@"
+    reconcile_platt_outcomes
     if ! emit_canonical_snapshot; then
       echo "[CRON] emit_canonical_snapshot failed after auto_trader." >&2
     fi
@@ -138,6 +147,7 @@ PY
     fi
     run_with_logging "auto_trader_core: run_auto_trader.py (tickers=${CORE_TICKERS})" \
       "${PYTHON_BIN}" scripts/run_auto_trader.py --tickers "${CORE_TICKERS}" "$@"
+    reconcile_platt_outcomes
     if ! emit_canonical_snapshot; then
       echo "[CRON] emit_canonical_snapshot failed after auto_trader_core." >&2
     fi

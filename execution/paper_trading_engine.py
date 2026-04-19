@@ -543,8 +543,11 @@ class PaperTradingEngine:
         #   active_extractor may switch to "synthetic" on yfinance failure,
         #   setting effective_execution_mode="synthetic" for the cycle, which
         #   would tag the close is_synthetic=1 and exclude it from
-        #   production_closed_trades.  Best-effort: if DB lookup fails,
-        #   fall through to the default execution_mode-based logic.
+        #   production_closed_trades.
+        # Fallback policy: when opener_id is known but DB lookup fails, default
+        # to is_synthetic=0 (safe/live direction).  The execution_mode fallback
+        # is NOT used for forced exits because the current cycle's data-source
+        # mode is irrelevant to whether the OPENING position was live.
         _forced_is_synthetic: Optional[int] = None
         if forced_exit_reason:
             _opener_id = self.portfolio.entry_trade_ids.get(ticker)
@@ -561,10 +564,22 @@ class PaperTradingEngine:
                             "from opener trade_id=%d",
                             ticker, _forced_is_synthetic, int(_opener_id),
                         )
+                    else:
+                        # Row absent — opener may have been pruned; default live (0).
+                        _forced_is_synthetic = 0
+                        logger.warning(
+                            "[LIVE_FUNNEL] Forced exit %s: opener trade_id=%d not found "
+                            "in DB — defaulting is_synthetic=0 (live). "
+                            "THIN_LINKAGE credit may be affected.",
+                            ticker, int(_opener_id),
+                        )
                 except Exception as _fe_exc:
-                    logger.debug(
-                        "[LIVE_FUNNEL] Could not look up opener is_synthetic for %s "
-                        "(trade_id=%s): %s — using execution_mode fallback",
+                    # DB error — do NOT fall through to execution_mode; default live (0).
+                    _forced_is_synthetic = 0
+                    logger.warning(
+                        "[LIVE_FUNNEL] Forced exit %s: DB lookup for opener trade_id=%s "
+                        "failed (%s) — defaulting is_synthetic=0 (live). "
+                        "execution_mode fallback suppressed to prevent contamination.",
                         ticker, _opener_id, _fe_exc,
                     )
 
