@@ -21,6 +21,7 @@ CLI:
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import subprocess
 import sys
@@ -122,12 +123,23 @@ def _scan_audit_coverage(audit_root: Path) -> Dict[str, Any]:
     production_tsids: set[str] = set()
     tsids_by_subdir: Dict[str, set[str]] = {}
     scan_errors: list[str] = []
+    non_production_parse_errors = 0
+    non_production_parse_error_sample: list[str] = []
+    excluded_corrupted_legacy_files = 0
+    excluded_corrupted_legacy_sample: list[str] = []
+    corrupted_legacy_dir_exists = (audit_root / "corrupted_legacy").exists()
 
     if not audit_root.exists():
         return {
             "production_tsids": production_tsids,
             "tsids_by_subdir": tsids_by_subdir,
             "scan_errors": scan_errors,
+            "non_production_parse_errors": non_production_parse_errors,
+            "non_production_parse_error_sample": non_production_parse_error_sample,
+            "excluded_corrupted_legacy_files": excluded_corrupted_legacy_files,
+            "excluded_corrupted_legacy_sample": excluded_corrupted_legacy_sample,
+            "corrupted_legacy_dir_exists": corrupted_legacy_dir_exists,
+            "audit_root_missing": True,
         }
 
     # corrupted_legacy/ holds pre-routing malformed files — skip intentionally
@@ -139,6 +151,9 @@ def _scan_audit_coverage(audit_root: Path) -> Dict[str, Any]:
         except Exception:
             rel_parts = ()
         if rel_parts and rel_parts[0] in _EXCLUDED_SUBDIRS:
+            excluded_corrupted_legacy_files += 1
+            if len(excluded_corrupted_legacy_sample) < 3:
+                excluded_corrupted_legacy_sample.append(f.relative_to(audit_root).as_posix())
             continue
 
         try:
@@ -156,6 +171,10 @@ def _scan_audit_coverage(audit_root: Path) -> Dict[str, Any]:
             # research/ or quarantine/ don't affect THIN_LINKAGE coverage.
             if rel_parent_for_err == "production":
                 scan_errors.append(f"{rel}: {exc.__class__.__name__}: {exc}")
+            else:
+                non_production_parse_errors += 1
+                if len(non_production_parse_error_sample) < 3:
+                    non_production_parse_error_sample.append(f"{rel}: {exc.__class__.__name__}: {exc}")
             continue
 
         if not tsid:
@@ -175,6 +194,12 @@ def _scan_audit_coverage(audit_root: Path) -> Dict[str, Any]:
         "production_tsids": production_tsids,
         "tsids_by_subdir": tsids_by_subdir,
         "scan_errors": scan_errors,
+        "non_production_parse_errors": non_production_parse_errors,
+        "non_production_parse_error_sample": non_production_parse_error_sample,
+        "excluded_corrupted_legacy_files": excluded_corrupted_legacy_files,
+        "excluded_corrupted_legacy_sample": excluded_corrupted_legacy_sample,
+        "corrupted_legacy_dir_exists": corrupted_legacy_dir_exists,
+        "audit_root_missing": False,
     }
 
 
@@ -251,7 +276,7 @@ def _query_thin_linkage(
 
     try:
         rows = conn.execute("""
-            SELECT ticker, ts_signal_id FROM trade_executions
+            SELECT id, ticker, ts_signal_id FROM trade_executions
             WHERE is_close = 0 AND COALESCE(is_synthetic, 0) = 0
               AND ts_signal_id IS NOT NULL
         """).fetchall()
@@ -281,13 +306,20 @@ def _query_thin_linkage(
     production_tsids = audit_index["production_tsids"]
     tsids_by_subdir = audit_index["tsids_by_subdir"]
     scan_errors = audit_index["scan_errors"]
+    non_production_parse_errors = audit_index["non_production_parse_errors"]
+    non_production_parse_error_sample = audit_index["non_production_parse_error_sample"]
+    excluded_corrupted_legacy_files = audit_index["excluded_corrupted_legacy_files"]
+    excluded_corrupted_legacy_sample = audit_index["excluded_corrupted_legacy_sample"]
+    corrupted_legacy_dir_exists = audit_index["corrupted_legacy_dir_exists"]
+    audit_root_missing = bool(audit_index.get("audit_root_missing"))
 
     covered: Dict[str, int] = {}
     legacy_n = 0
     other_n = 0
     missing_n = 0
     misrouted_by_subdir: Dict[str, int] = {}
-    for ticker, tsid in rows:
+    misrouted_examples: Dict[str, Dict[str, Any]] = {}
+    for row_id, ticker, tsid in rows:
         tsid_s = str(tsid or "").strip()
         if tsid_s in production_tsids:
             covered[ticker] = covered.get(ticker, 0) + 1
@@ -299,12 +331,44 @@ def _query_thin_linkage(
             for subdir, tsids in tsids_by_subdir.items():
                 if tsid_s in tsids:
                     misrouted_by_subdir[subdir] = misrouted_by_subdir.get(subdir, 0) + 1
+                    misrouted_examples.setdefault(
+                        subdir,
+                        {"id": row_id, "ticker": ticker, "ts_signal_id": tsid_s},
+                    )
                     found_anywhere = True
             if not found_anywhere:
                 missing_n += 1
 
-    status = "audit_scan_error" if scan_errors else "ok"
-    query_error = f"{len(scan_errors)} audit file parse error(s)" if scan_errors else None
+    status = "audit_root_missing" if audit_root_missing else ("audit_scan_error" if scan_errors else "ok")
+    if audit_root_missing:
+        query_error = f"forecast audit root missing: {audit_root}"
+    else:
+        query_error = f"{len(scan_errors)} audit file parse error(s)" if scan_errors else None
+    hygiene_status = (
+        "missing"
+        if audit_root_missing
+        else "degraded"
+        if excluded_corrupted_legacy_files or non_production_parse_errors or scan_errors
+        else "clean"
+    )
+    remediation_steps: list[str] = []
+    if other_n > 0:
+        remediation_steps.append(
+            f"Investigate {other_n} canonical-tsid lot(s) without production audits before clearing THIN_LINKAGE"
+        )
+    quarantine_example = misrouted_examples.get("production/quarantine")
+    if quarantine_example:
+        remediation_steps.append(
+            f"Verify {quarantine_example['ticker']} id={quarantine_example['id']} quarantine reason before restoring to production/"
+        )
+    if misrouted_examples.get("research"):
+        remediation_steps.append(
+            "Fix ETL routing: live-mode runs should write to production/, not research/"
+        )
+    if audit_root_missing:
+        remediation_steps.append(
+            f"Restore the forecast audit root at {audit_root} before treating thin linkage as valid"
+        )
 
     return {
         **base,
@@ -312,6 +376,14 @@ def _query_thin_linkage(
         "query_error": query_error,
         "audit_scan_errors": len(scan_errors),
         "audit_scan_error_sample": scan_errors[:3],
+        "audit_hygiene": {
+            "status": hygiene_status,
+            "corrupted_legacy_dir_exists": corrupted_legacy_dir_exists,
+            "excluded_corrupted_legacy_files": excluded_corrupted_legacy_files,
+            "excluded_corrupted_legacy_sample": excluded_corrupted_legacy_sample,
+            "non_production_parse_errors": non_production_parse_errors,
+            "non_production_parse_error_sample": non_production_parse_error_sample,
+        },
         "open_lots_total": len(rows),
         "open_lots_with_audit_coverage": sum(covered.values()),
         "open_lots_legacy_no_coverage": legacy_n,
@@ -322,8 +394,9 @@ def _query_thin_linkage(
         "pipeline_defects": {
             "canonical_tsid_lots_without_production_audit": other_n,
             "misrouted_audit_lots_by_subdir": dict(sorted(misrouted_by_subdir.items())),
+            "remediation_steps": remediation_steps,
             "missing_audit_lots": missing_n,
-            "action_required": other_n > 0 or bool(scan_errors),
+            "action_required": other_n > 0 or bool(scan_errors) or audit_root_missing,
         },
         "note": (
             "Each covered-lot close increments matched by 1. "
@@ -331,6 +404,10 @@ def _query_thin_linkage(
             "canonical_tsid_lots_without_production_audit counts lots lacking a "
             "production-root audit file. If misrouted_audit_lots_by_subdir is non-empty, "
             "the audit exists in research/ or quarantine/ and must not count toward THIN_LINKAGE. "
+            "audit_hygiene surfaces excluded corrupted_legacy files and non-production parse "
+            "errors so they are visible even when they do not affect matched. "
+            "The non-production parse count is intentionally flattened so consumers do not "
+            "couple to directory names. "
             "No threshold dodge — code cannot force closes, only ensure valid closes count."
         ),
     }
@@ -361,12 +438,35 @@ def _run_utilization(db_path: Path, capital: float) -> Optional[Dict[str, Any]]:
         return {"error": str(exc)}
 
 
+def _file_age_minutes(path: Path, reference_dt: datetime) -> Optional[float]:
+    """Return the file age in minutes relative to reference_dt, or None when unavailable."""
+    try:
+        mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+    except Exception:
+        return None
+    age = (reference_dt - mtime).total_seconds() / 60.0
+    return round(age, 2)
+
+
+def _derive_evidence_health(thin_linkage: Dict[str, Any]) -> str:
+    """evidence_health is degraded when audit hygiene is degraded or pipeline defects require action."""
+    hygiene = thin_linkage.get("audit_hygiene") or {}
+    defects = thin_linkage.get("pipeline_defects") or {}
+    if thin_linkage.get("status") != "ok":
+        return "degraded"
+    if hygiene.get("status") == "degraded" or bool(defects.get("action_required")):
+        return "degraded"
+    return "clean"
+
+
 def emit_snapshot(db_path: Path) -> Dict[str, Any]:
     """Build and return the canonical snapshot dict."""
+    generated_dt = datetime.now(timezone.utc)
     gate = _read_gate_artifact()
     gate_summary = None
     if gate:
         gate_path = gate.get("_artifact_path") or str(_gate_artifact_candidates()[0])
+        gate_artifact_age_minutes = _file_age_minutes(Path(gate_path), generated_dt)
         gate_summary = {
             "phase3_ready": gate.get("phase3_ready"),
             "posture": gate.get("posture"),
@@ -374,7 +474,10 @@ def emit_snapshot(db_path: Path) -> Dict[str, Any]:
             "matched": gate.get("readiness", {}).get("outcome_matched"),
             "eligible": gate.get("readiness", {}).get("outcome_eligible"),
             "artifact_path": str(gate_path),
+            "gate_artifact_age_minutes": gate_artifact_age_minutes,
         }
+    else:
+        gate_artifact_age_minutes = None
 
     conn = sqlite3.connect(str(db_path))
     try:
@@ -407,10 +510,11 @@ def emit_snapshot(db_path: Path) -> Dict[str, Any]:
 
     ann_roi = util.get("roi_ann_pct") if isinstance(util, dict) else None
     ngn_gap_pp = round(28.0 - ann_roi, 2) if ann_roi is not None else None
+    evidence_health = _derive_evidence_health(thin_linkage)
 
     return {
         "schema_version": SCHEMA_VERSION,
-        "generated_utc": datetime.now(timezone.utc).isoformat(),
+        "generated_utc": generated_dt.isoformat(),
         "db_path": str(db_path),
         "source_contract": {
             "canonical": {
@@ -437,6 +541,7 @@ def emit_snapshot(db_path: Path) -> Dict[str, Any]:
             "ann_roi_pct": ann_roi,
             "ngn_hurdle_pct": 28.0,
             "gap_to_hurdle_pp": ngn_gap_pp,
+            "evidence_health": evidence_health,
             "unattended_gate": unattended_status,
             "unattended_ready": unattended_status == "PASS",
         },
@@ -446,6 +551,31 @@ def emit_snapshot(db_path: Path) -> Dict[str, Any]:
             "All plans must reference this file for measured metrics."
         ),
     }
+
+
+def _fmt_float(value: Any, pattern: str, fallback: str = "N/A") -> str:
+    """Format numeric CLI fields defensively.
+
+    Snapshot data can be partially unavailable in degraded states. The CLI must
+    not short-circuit on None or string error payloads, because that hides the
+    very hygiene warnings the snapshot is meant to surface.
+    """
+    try:
+        if value is None:
+            return fallback
+        return format(float(value), pattern)
+    except Exception:
+        return fallback
+
+
+def _fmt_currency(value: Any, pattern: str = ",.0f", fallback: str = "N/A") -> str:
+    """Format currency-like fields defensively for CLI output."""
+    try:
+        if value is None:
+            return fallback
+        return format(float(value), pattern)
+    except Exception:
+        return fallback
 
 
 @click.command()
@@ -471,18 +601,37 @@ def main(db: str, output: str, as_json: bool) -> None:
 
     print("Canonical PMX Snapshot")
     print(f"  Schema version     : {snapshot['schema_version']}")
-    print(f"  Capital base       : ${cap.get('capital', 'N/A'):,.0f}  (cash: ${cap.get('cash', 0):,.0f})")
-    print(f"  Closed trades      : {pnl['n_trips']}  WR={pnl['win_rate'] or 0:.1%}  "
-          f"PF={pnl['profit_factor'] or 0:.2f}  PnL=${pnl['total_pnl']:+,.2f}")
+    print(
+        "  Capital base       : $"
+        f"{_fmt_currency(cap.get('capital'))}  (cash: ${_fmt_currency(cap.get('cash'))})"
+    )
+    print(
+        f"  Closed trades      : {pnl['n_trips']}  "
+        f"WR={_fmt_float(pnl.get('win_rate'), '.1%') if pnl.get('win_rate') is not None else 'N/A'}  "
+        f"PF={_fmt_float(pnl.get('profit_factor'), '.2f') if pnl.get('profit_factor') is not None else 'N/A'}  "
+        f"PnL=${_fmt_float(pnl.get('total_pnl'), '+,.2f') if pnl.get('total_pnl') is not None else 'N/A'}"
+    )
     if isinstance(util, dict) and "ann_roi_pct" in util:
-        print(f"  Ann ROI            : {util['ann_roi_pct']:.1f}%  "
-              f"({util.get('trades_per_day', 0):.2f} trades/day, "
-              f"{util.get('deployment_pct', 0):.1f}% capital deployed/day)")
-    print(f"  NGN hurdle gap     : {s['gap_to_hurdle_pp']:+.1f}pp  (hurdle=28%)")
+        ann_roi = _fmt_float(util.get("ann_roi_pct"), ".1f")
+        trades_per_day = _fmt_float(util.get("trades_per_day"), ".2f")
+        deployment_pct = _fmt_float(util.get("deployment_pct"), ".1f")
+        print(
+            f"  Ann ROI            : {ann_roi}%  "
+            f"({trades_per_day} trades/day, {deployment_pct}% capital deployed/day)"
+        )
+    gap_pp = s.get("gap_to_hurdle_pp")
+    gap_str = f"{gap_pp:+.1f}pp" if gap_pp is not None else "N/A"
+    print(f"  NGN hurdle gap     : {gap_str}  (hurdle=28%)")
+    print(f"  Evidence health    : {s.get('evidence_health', 'unknown')}")
     print(f"  Unattended gate    : {s['unattended_gate']}")
     if gate:
-        print(f"  Phase3 posture     : {gate.get('posture')}  "
-              f"matched={gate.get('matched')}/{gate.get('eligible')}")
+        age = gate.get("gate_artifact_age_minutes")
+        age_str = f"{age:.1f}m" if isinstance(age, (int, float)) else "N/A"
+        print(
+            f"  Phase3 posture     : {gate.get('posture')}  "
+            f"matched={gate.get('matched')}/{gate.get('eligible')}  "
+            f"gate_age={age_str}"
+        )
     tl = snapshot.get("thin_linkage") or {}
     if tl:
         status = tl.get("status", "ok")
@@ -490,6 +639,7 @@ def main(db: str, output: str, as_json: bool) -> None:
         matched_threshold = tl.get("matched_threshold")
         matched_needed = tl.get("matched_needed")
         deadline = tl.get("warmup_deadline")
+        hygiene = tl.get("audit_hygiene") or {}
         if status == "ok":
             covered_str = "  ".join(
                 f"{t}x{n}" for t, n in sorted((tl.get("covered_lots_by_ticker") or {}).items())
@@ -519,6 +669,16 @@ def main(db: str, output: str, as_json: bool) -> None:
                     f"    audit scan errs  : {tl['audit_scan_errors']}  "
                     f"sample={sample_str}"
                 )
+        if hygiene and hygiene.get("status") != "clean":
+            excluded = hygiene.get("excluded_corrupted_legacy_files")
+            non_prod_parse_errors = hygiene.get("non_production_parse_errors")
+            sample = hygiene.get("non_production_parse_error_sample") or []
+            sample_str = "; ".join(sample[:2]) if sample else "n/a"
+            print(
+                f"    audit hygiene    : {hygiene.get('status')}  "
+                f"excluded_legacy={excluded}  non_prod_parse_errors={non_prod_parse_errors}  "
+                f"sample={sample_str}"
+            )
     print(f"\nArtifact: {output}")
 
 

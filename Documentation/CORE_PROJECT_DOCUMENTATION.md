@@ -37,15 +37,22 @@ This document is intentionally “policy-like”: it tells you what must be true
 - THIN_LINKAGE coverage plan added: `Documentation/THIN_LINKAGE_COVERAGE_PLAN_2026-04-19.md`.
 - `scripts/emit_canonical_snapshot.py` extended with a `thin_linkage` section exposing:
   `status`, `matched_current`, `matched_needed`, `warmup_deadline`, `covered_lots_by_ticker`,
-  `open_lots_legacy_no_coverage`, `open_lots_other_no_coverage`, and `pipeline_defects`.
+  `open_lots_legacy_no_coverage`, `open_lots_other_no_coverage`, `pipeline_defects`, and
+  `audit_hygiene`. The top-level `summary` block now also exposes `evidence_health` so
+  watchdogs that only read the summary still see degraded evidence infrastructure. The
+  gate block now includes `gate_artifact_age_minutes` so stale `matched_current` cannot be
+  mistaken for a fresh gate run.
 - Pipeline defect identified: 2 open lots (AAPL id=253, NVDA id=316) have canonical tsids
   whose audit files are misrouted to `research/` and `production/quarantine/` respectively.
   Stub-backfill rejected (manufactures evidence); regression tests added to document that
   subdirs are intentionally excluded from the THIN_LINKAGE scan and that schema/query failures
   surface explicit `status` values instead of silent zero-count fallbacks (including
-  `audit_scan_error` when malformed audit JSON is present).
-- 7 new tests in `tests/scripts/test_emit_canonical_snapshot.py` covering the `thin_linkage`
-  section, `pipeline_defects` flag, explicit status handling, and research/quarantine exclusion behavior.
+  `audit_scan_error` when malformed audit JSON is present). Excluded `corrupted_legacy/` files
+  and non-production parse errors are tracked in `audit_hygiene` so they stay visible.
+  `pipeline_defects.remediation_steps` names the concrete fix without requiring a second doc lookup.
+- 13 tests in `tests/scripts/test_emit_canonical_snapshot.py` covering the `thin_linkage`
+  section, `pipeline_defects` flag, explicit status handling, evidence-health rollup, gate
+  count consistency, gate freshness, remediation dispatch, and research/quarantine exclusion behavior.
 - Authoritative constraint: 38 legacy lots contribute 0 THIN_LINKAGE credit; 18 covered
   lots (AMZN×6, GOOG×5, NVDA×6, AAPL×1) each contribute +1 when closed via stop/target.
   This is a ceiling, not a guarantee; code cannot force closes.

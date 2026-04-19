@@ -55,6 +55,14 @@ explicit `status` field for the linkage scan (`ok`, `schema_minimal`, `query_err
 If `status=audit_scan_error`, the scan found malformed audit JSON under
 `logs/forecast_audits/`; the open-lot counts still reflect valid files, but the tree is
 not clean and should be sanitized before anyone treats the snapshot as green.
+The snapshot also carries `audit_hygiene` so excluded `corrupted_legacy/` files and
+non-production parse errors stay visible even when they do not affect `matched`.
+`audit_hygiene` now includes `corrupted_legacy_dir_exists` and a flattened
+`non_production_parse_errors` count so consumers do not need to know the internal
+subdirectory layout. `summary.evidence_health` rolls this up into a top-level health
+signal for watchdogs that only inspect the summary block. The malformed research-side
+audit was relocated to `corrupted_legacy/`, so the live non-production parse baseline is
+now expected to remain at `0` unless a new stray file appears.
 
 ## Pipeline Defect: Misrouted Audit Files
 
@@ -115,6 +123,12 @@ THIN_LINKAGE       : 1/10 matched  need 9 more  deadline=2026-04-24
 
 If the scan is degraded, the CLI prints an explicit `status` line and an error sample
 instead of silently falling back to empty counts.
+If `audit_hygiene.status=degraded`, the CLI also prints the hygiene summary so ignored
+corruption is visible instead of being mistaken for cleanliness. The `pipeline_defects`
+block also includes `remediation_steps` so the alarm is self-contained instead of
+requiring a second document lookup.
+The gate section now includes `gate_artifact_age_minutes`; monitoring consumers should
+treat `matched_current` as stale when the artifact age exceeds the cron interval.
 
 `matched_current` increments when the gate artifact is refreshed by a successful close. To
 force a gate re-run:

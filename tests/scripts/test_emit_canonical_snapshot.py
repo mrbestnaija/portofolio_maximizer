@@ -7,11 +7,14 @@ Pins three invariants:
 """
 
 import json
+import os
 import sqlite3
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
+from click.testing import CliRunner
 
 import scripts.emit_canonical_snapshot as mod
 from scripts.emit_canonical_snapshot import emit_snapshot, SCHEMA_VERSION
@@ -161,6 +164,8 @@ class TestCanonicalSnapshot:
             json.dumps({"posture": "AUDIT_GATE", "phase3_ready": True}),
             encoding="utf-8",
         )
+        old_mtime = time.time() - 7200
+        os.utime(audit_gate / "production_gate_latest.json", (old_mtime, old_mtime))
 
         monkeypatch.setattr(mod, "ROOT", repo_root)
         monkeypatch.setattr(
@@ -171,12 +176,48 @@ class TestCanonicalSnapshot:
 
         snapshot = mod.emit_snapshot(minimal_db)
         assert snapshot["gate"]["artifact_path"] == str(audit_gate / "production_gate_latest.json")
+        assert snapshot["gate"]["gate_artifact_age_minutes"] >= 119
         assert snapshot["source_contract"]["canonical"]["gate_artifact"] == str(
             audit_gate / "production_gate_latest.json"
         )
         assert Path(snapshot["source_contract"]["ui_only"]["metrics_summary"]).as_posix().endswith(
             "visualizations/performance/metrics_summary.json"
         )
+
+    def test_derive_evidence_health_combinatorics(self):
+        """Evidence health is degraded when hygiene is degraded or defects require action."""
+        ok = {"status": "ok", "audit_hygiene": {"status": "clean"}, "pipeline_defects": {"action_required": False}}
+        degraded_hygiene = {"status": "ok", "audit_hygiene": {"status": "degraded"}, "pipeline_defects": {"action_required": False}}
+        degraded_defects = {"status": "ok", "audit_hygiene": {"status": "clean"}, "pipeline_defects": {"action_required": True}}
+
+        assert mod._derive_evidence_health(ok) == "clean"
+        assert mod._derive_evidence_health(degraded_hygiene) == "degraded"
+        assert mod._derive_evidence_health(degraded_defects) == "degraded"
+
+    def test_snapshot_matches_gate_artifact_matched_count(
+        self, thin_linkage_db, audit_dir_with_two_tsids, tmp_path, monkeypatch
+    ):
+        """thin_linkage.matched_current must match the gate artifact outcome_matched."""
+        repo_root = tmp_path / "repo"
+        audit_gate = repo_root / "logs" / "audit_gate"
+        audit_gate.mkdir(parents=True, exist_ok=True)
+        (audit_gate / "production_gate_latest.json").write_text(
+            json.dumps(
+                {
+                    "posture": "WARMUP_COVERED_PASS",
+                    "phase3_ready": True,
+                    "readiness": {"outcome_matched": 3, "outcome_eligible": 7},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        monkeypatch.setattr(mod, "ROOT", repo_root)
+        _set_thin_linkage_paths(monkeypatch, audit_dir_with_two_tsids)
+        snapshot = mod.emit_snapshot(thin_linkage_db)
+        assert snapshot["gate"]["matched"] == 3
+        assert snapshot["thin_linkage"]["matched_current"] == 3
+        assert snapshot["summary"]["evidence_health"] == "degraded"
 
 
 # ---------------------------------------------------------------------------
@@ -271,6 +312,7 @@ class TestThinLinkageSection:
         required_fields = {
             "matched_current", "matched_threshold", "matched_needed",
             "warmup_deadline", "status", "query_error", "audit_scan_errors",
+            "audit_hygiene",
             "open_lots_total", "open_lots_with_audit_coverage",
             "open_lots_legacy_no_coverage", "open_lots_other_no_coverage",
             "covered_lots_by_ticker", "pipeline_defects", "note",
@@ -280,6 +322,9 @@ class TestThinLinkageSection:
         assert tl["status"] == "ok"
         assert tl["query_error"] is None
         assert tl["audit_scan_errors"] == 0
+        assert tl["audit_hygiene"]["status"] == "clean"
+        assert tl["audit_hygiene"]["corrupted_legacy_dir_exists"] is False
+        assert tl["audit_hygiene"]["non_production_parse_errors"] == 0
 
     def test_covered_lots_by_ticker_sum_matches_total_covered(
         self, thin_linkage_db, audit_dir_with_two_tsids, monkeypatch
@@ -319,7 +364,30 @@ class TestThinLinkageSection:
         assert defects["canonical_tsid_lots_without_production_audit"] == 1
         assert defects["missing_audit_lots"] == 1
         assert defects["misrouted_audit_lots_by_subdir"] == {}
+        assert defects["remediation_steps"] == [
+            "Investigate 1 canonical-tsid lot(s) without production audits before clearing THIN_LINKAGE"
+        ]
         assert defects["action_required"] is True
+
+    def test_remediation_steps_disappear_when_defects_resolved(
+        self, thin_linkage_db, tmp_path, monkeypatch
+    ):
+        """When all canonical-tsid lots are covered, remediation steps should disappear."""
+        root = tmp_path / "forecast_audits"
+        production = root / "production"
+        production.mkdir(parents=True)
+        for tsid in ("ts_AMZN_20260402_aabb_0001", "ts_AMZN_20260402_aabb_0002", "ts_NVDA_20260402_ccdd_0001_no_audit"):
+            (production / f"forecast_audit_{tsid}.json").write_text(
+                json.dumps({"signal_context": {"ts_signal_id": tsid, "ticker": "AMZN"}}),
+                encoding="utf-8",
+            )
+
+        _set_thin_linkage_paths(monkeypatch, production)
+        snapshot = mod.emit_snapshot(thin_linkage_db)
+        defects = snapshot["thin_linkage"]["pipeline_defects"]
+        assert defects["canonical_tsid_lots_without_production_audit"] == 0
+        assert defects["remediation_steps"] == []
+        assert defects["action_required"] is False
 
     def test_research_and_quarantine_subdirs_excluded_from_coverage(
         self, thin_linkage_db, tmp_path, monkeypatch
@@ -362,6 +430,9 @@ class TestThinLinkageSection:
         assert defects["missing_audit_lots"] == 1
         assert defects["misrouted_audit_lots_by_subdir"]["research"] == 1
         assert defects["misrouted_audit_lots_by_subdir"]["production/quarantine"] == 1
+        assert "Investigate 3 canonical-tsid lot(s) without production audits before clearing THIN_LINKAGE" in defects["remediation_steps"]
+        assert any(step.startswith("Verify AMZN id=") and "restoring to production/" in step for step in defects["remediation_steps"])
+        assert "Fix ETL routing: live-mode runs should write to production/, not research/" in defects["remediation_steps"]
         assert tl["pipeline_defects"]["action_required"] is True
 
     def test_schema_minimal_db_reports_explicit_status(
@@ -396,3 +467,81 @@ class TestThinLinkageSection:
         assert tl["status"] == "audit_scan_error"
         assert tl["audit_scan_errors"] == 1
         assert tl["query_error"]
+
+    def test_missing_audit_root_reports_explicit_status(
+        self, thin_linkage_db, tmp_path, monkeypatch
+    ):
+        """Missing audit root must fail closed with an explicit status, not a partial scan."""
+        missing_root = tmp_path / "forecast_audits_missing"
+        monkeypatch.setattr(mod, "_FORECAST_AUDIT_ROOT", missing_root)
+        snapshot = mod.emit_snapshot(thin_linkage_db)
+        tl = snapshot["thin_linkage"]
+        assert tl["status"] == "audit_root_missing"
+        assert "missing" in tl["query_error"].lower()
+        assert tl["audit_hygiene"]["status"] == "missing"
+        assert tl["audit_hygiene"]["corrupted_legacy_dir_exists"] is False
+        assert tl["audit_hygiene"]["excluded_corrupted_legacy_files"] == 0
+        assert tl["pipeline_defects"]["action_required"] is True
+        assert snapshot["summary"]["evidence_health"] == "degraded"
+
+    def test_audit_hygiene_reports_excluded_and_ignored_errors(
+        self, thin_linkage_db, tmp_path, monkeypatch
+    ):
+        """Excluded corrupted_legacy and non-production parse errors must stay visible."""
+        root = tmp_path / "forecast_audits"
+        production = root / "production"
+        research = root / "research"
+        corrupted = root / "corrupted_legacy"
+        production.mkdir(parents=True)
+        research.mkdir(parents=True)
+        corrupted.mkdir(parents=True)
+
+        tsid = "ts_AMZN_20260402_aabb_0001"
+        (production / f"forecast_audit_{tsid}.json").write_text(
+            json.dumps({"signal_context": {"ts_signal_id": tsid, "ticker": "AMZN"}}),
+            encoding="utf-8",
+        )
+        (research / "forecast_audit_bad.json").write_text("{not-json", encoding="utf-8")
+        (corrupted / "forecast_audit_old.json").write_text("{still-not-json", encoding="utf-8")
+
+        _set_thin_linkage_paths(monkeypatch, production)
+        snapshot = mod.emit_snapshot(thin_linkage_db)
+        tl = snapshot["thin_linkage"]
+        hygiene = tl["audit_hygiene"]
+        assert tl["status"] == "ok"
+        assert hygiene["status"] == "degraded"
+        assert hygiene["corrupted_legacy_dir_exists"] is True
+        assert hygiene["excluded_corrupted_legacy_files"] == 1
+        assert hygiene["non_production_parse_errors"] == 1
+        assert hygiene["non_production_parse_error_sample"]
+        assert snapshot["summary"]["evidence_health"] == "degraded"
+
+    def test_cli_prints_audit_hygiene_when_degraded(
+        self, thin_linkage_db, tmp_path, monkeypatch
+    ):
+        """CLI output must surface audit_hygiene even when thin_linkage status is ok."""
+        root = tmp_path / "forecast_audits"
+        production = root / "production"
+        research = root / "research"
+        corrupted = root / "corrupted_legacy"
+        production.mkdir(parents=True)
+        research.mkdir(parents=True)
+        corrupted.mkdir(parents=True)
+
+        tsid = "ts_AMZN_20260402_aabb_0001"
+        (production / f"forecast_audit_{tsid}.json").write_text(
+            json.dumps({"signal_context": {"ts_signal_id": tsid, "ticker": "AMZN"}}),
+            encoding="utf-8",
+        )
+        (research / "forecast_audit_bad.json").write_text("{not-json", encoding="utf-8")
+        (corrupted / "forecast_audit_old.json").write_text("{still-not-json", encoding="utf-8")
+
+        _set_thin_linkage_paths(monkeypatch, production)
+        runner = CliRunner()
+        result = runner.invoke(
+            mod.main,
+            ["--db", str(thin_linkage_db), "--output", str(tmp_path / "snapshot.json")],
+        )
+        assert result.exit_code == 0, result.output
+        assert "audit hygiene" in result.output
+        assert "degraded" in result.output
