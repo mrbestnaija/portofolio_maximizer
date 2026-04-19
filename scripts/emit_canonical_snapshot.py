@@ -112,73 +112,226 @@ def _query_open_risk(conn: sqlite3.Connection) -> Dict[str, Any]:
     }
 
 
-_PRODUCTION_AUDIT_DIR = ROOT / "logs" / "forecast_audits" / "production"
+_FORECAST_AUDIT_ROOT = ROOT / "logs" / "forecast_audits"
 _THIN_LINKAGE_THRESHOLD = 10
 _WARMUP_DEADLINE = "2026-04-24"
 
 
-def _load_audit_tsids(audit_dir: Path) -> set:
-    """Return the set of ts_signal_ids found in production audit files."""
-    tsids: set = set()
-    if not audit_dir.exists():
-        return tsids
-    for f in audit_dir.glob("forecast_audit_*.json"):
+def _scan_audit_coverage(audit_root: Path) -> Dict[str, Any]:
+    """Scan the forecast-audit tree and separate production coverage from misroutes."""
+    production_tsids: set[str] = set()
+    tsids_by_subdir: Dict[str, set[str]] = {}
+    scan_errors: list[str] = []
+
+    if not audit_root.exists():
+        return {
+            "production_tsids": production_tsids,
+            "tsids_by_subdir": tsids_by_subdir,
+            "scan_errors": scan_errors,
+        }
+
+    # corrupted_legacy/ holds pre-routing malformed files — skip intentionally
+    _EXCLUDED_SUBDIRS = {"corrupted_legacy"}
+
+    for f in audit_root.rglob("forecast_audit_*.json"):
+        try:
+            rel_parts = f.relative_to(audit_root).parts
+        except Exception:
+            rel_parts = ()
+        if rel_parts and rel_parts[0] in _EXCLUDED_SUBDIRS:
+            continue
+
         try:
             d = json.loads(f.read_text(encoding="utf-8"))
             sc = d.get("signal_context") or {}
             tsid = str(sc.get("ts_signal_id") or "").strip()
-            if tsid:
-                tsids.add(tsid)
+        except Exception as exc:
+            try:
+                rel = f.relative_to(audit_root).as_posix()
+                rel_parent_for_err = f.parent.relative_to(audit_root).as_posix()
+            except Exception:
+                rel = f.as_posix()
+                rel_parent_for_err = "unknown"
+            # Only report parse errors for files in production root — errors in
+            # research/ or quarantine/ don't affect THIN_LINKAGE coverage.
+            if rel_parent_for_err == "production":
+                scan_errors.append(f"{rel}: {exc.__class__.__name__}: {exc}")
+            continue
+
+        if not tsid:
+            continue
+
+        try:
+            rel_parent = f.parent.relative_to(audit_root).as_posix()
         except Exception:
-            pass
-    return tsids
+            rel_parent = f.parent.as_posix()
+
+        if rel_parent == "production":
+            production_tsids.add(tsid)
+        else:
+            tsids_by_subdir.setdefault(rel_parent, set()).add(tsid)
+
+    return {
+        "production_tsids": production_tsids,
+        "tsids_by_subdir": tsids_by_subdir,
+        "scan_errors": scan_errors,
+    }
 
 
 def _query_thin_linkage(
     conn: sqlite3.Connection,
     gate_summary: Optional[Dict[str, Any]],
-    audit_dir: Path = _PRODUCTION_AUDIT_DIR,
+    audit_root: Path = _FORECAST_AUDIT_ROOT,
 ) -> Dict[str, Any]:
     """THIN_LINKAGE countdown: classify open lots by audit file coverage.
 
     Each covered lot that closes gives +1 to gate matched.
     Legacy-tsid lots give 0 credit even when they close.
     """
-    audit_tsids = _load_audit_tsids(audit_dir)
+    matched = int((gate_summary or {}).get("matched") or 0)
+    base = {
+        "matched_current": matched,
+        "matched_threshold": _THIN_LINKAGE_THRESHOLD,
+        "matched_needed": max(0, _THIN_LINKAGE_THRESHOLD - matched),
+        "warmup_deadline": _WARMUP_DEADLINE,
+        "status": "ok",
+        "query_error": None,
+        "audit_scan_errors": 0,
+        "audit_scan_error_sample": [],
+    }
 
-    rows = conn.execute("""
-        SELECT ticker, ts_signal_id FROM trade_executions
-        WHERE is_close = 0 AND COALESCE(is_synthetic, 0) = 0
-          AND ts_signal_id IS NOT NULL
-    """).fetchall()
+    try:
+        columns = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(trade_executions)").fetchall()
+        }
+    except sqlite3.Error as exc:
+        return {
+            **base,
+            "status": "query_error",
+            "query_error": f"PRAGMA table_info(trade_executions) failed: {exc}",
+            "open_lots_total": None,
+            "open_lots_with_audit_coverage": None,
+            "open_lots_legacy_no_coverage": None,
+            "open_lots_other_no_coverage": None,
+            "covered_lots_by_ticker": {},
+            "pipeline_defects": {
+                "canonical_tsid_lots_without_production_audit": None,
+                "misrouted_audit_lots_by_subdir": {},
+                "missing_audit_lots": None,
+                "action_required": True,
+            },
+            "note": (
+                "Thin-linkage countdown unavailable: could not inspect trade_executions schema. "
+                "No threshold dodge — fix the schema/query path before using this snapshot."
+            ),
+        }
+
+    if "ts_signal_id" not in columns:
+        return {
+            **base,
+            "status": "schema_minimal",
+            "query_error": "trade_executions.ts_signal_id column missing",
+            "open_lots_total": None,
+            "open_lots_with_audit_coverage": None,
+            "open_lots_legacy_no_coverage": None,
+            "open_lots_other_no_coverage": None,
+            "covered_lots_by_ticker": {},
+            "pipeline_defects": {
+                "canonical_tsid_lots_without_production_audit": None,
+                "misrouted_audit_lots_by_subdir": {},
+                "missing_audit_lots": None,
+                "action_required": True,
+            },
+            "note": (
+                "Thin-linkage countdown unavailable: trade_executions.ts_signal_id is missing. "
+                "This is explicit schema-minimal status, not an empty-linkage pass."
+            ),
+        }
+
+    try:
+        rows = conn.execute("""
+            SELECT ticker, ts_signal_id FROM trade_executions
+            WHERE is_close = 0 AND COALESCE(is_synthetic, 0) = 0
+              AND ts_signal_id IS NOT NULL
+        """).fetchall()
+    except sqlite3.Error as exc:
+        return {
+            **base,
+            "status": "query_error",
+            "query_error": f"trade_executions open-lot query failed: {exc}",
+            "open_lots_total": None,
+            "open_lots_with_audit_coverage": None,
+            "open_lots_legacy_no_coverage": None,
+            "open_lots_other_no_coverage": None,
+            "covered_lots_by_ticker": {},
+            "pipeline_defects": {
+                "canonical_tsid_lots_without_production_audit": None,
+                "misrouted_audit_lots_by_subdir": {},
+                "missing_audit_lots": None,
+                "action_required": True,
+            },
+            "note": (
+                "Thin-linkage countdown unavailable: could not read open lots. "
+                "No threshold dodge — fix the query path before using this snapshot."
+            ),
+        }
+
+    audit_index = _scan_audit_coverage(audit_root)
+    production_tsids = audit_index["production_tsids"]
+    tsids_by_subdir = audit_index["tsids_by_subdir"]
+    scan_errors = audit_index["scan_errors"]
 
     covered: Dict[str, int] = {}
     legacy_n = 0
     other_n = 0
+    missing_n = 0
+    misrouted_by_subdir: Dict[str, int] = {}
     for ticker, tsid in rows:
         tsid_s = str(tsid or "").strip()
-        if tsid_s in audit_tsids:
+        if tsid_s in production_tsids:
             covered[ticker] = covered.get(ticker, 0) + 1
         elif tsid_s.startswith("legacy_"):
             legacy_n += 1
         else:
             other_n += 1
+            found_anywhere = False
+            for subdir, tsids in tsids_by_subdir.items():
+                if tsid_s in tsids:
+                    misrouted_by_subdir[subdir] = misrouted_by_subdir.get(subdir, 0) + 1
+                    found_anywhere = True
+            if not found_anywhere:
+                missing_n += 1
 
-    matched = int((gate_summary or {}).get("matched") or 0)
+    status = "audit_scan_error" if scan_errors else "ok"
+    query_error = f"{len(scan_errors)} audit file parse error(s)" if scan_errors else None
+
     return {
-        "matched_current": matched,
-        "matched_threshold": _THIN_LINKAGE_THRESHOLD,
-        "matched_needed": max(0, _THIN_LINKAGE_THRESHOLD - matched),
-        "warmup_deadline": _WARMUP_DEADLINE,
+        **base,
+        "status": status,
+        "query_error": query_error,
+        "audit_scan_errors": len(scan_errors),
+        "audit_scan_error_sample": scan_errors[:3],
         "open_lots_total": len(rows),
         "open_lots_with_audit_coverage": sum(covered.values()),
         "open_lots_legacy_no_coverage": legacy_n,
         "open_lots_other_no_coverage": other_n,
         "covered_lots_by_ticker": covered,
+        # Lots with canonical tsids but no production audit file are pipeline defects.
+        # Common causes: audit written to research/ (ETL run) or production/quarantine/ (hygiene sweep).
+        "pipeline_defects": {
+            "canonical_tsid_lots_without_production_audit": other_n,
+            "misrouted_audit_lots_by_subdir": dict(sorted(misrouted_by_subdir.items())),
+            "missing_audit_lots": missing_n,
+            "action_required": other_n > 0 or bool(scan_errors),
+        },
         "note": (
             "Each covered-lot close increments matched by 1. "
             "Legacy lots (legacy_ prefix) give 0 credit when they close. "
-            "Code cannot force closes — only stop/target price action before deadline."
+            "canonical_tsid_lots_without_production_audit counts lots lacking a "
+            "production-root audit file. If misrouted_audit_lots_by_subdir is non-empty, "
+            "the audit exists in research/ or quarantine/ and must not count toward THIN_LINKAGE. "
+            "No threshold dodge — code cannot force closes, only ensure valid closes count."
         ),
     }
 
@@ -210,27 +363,6 @@ def _run_utilization(db_path: Path, capital: float) -> Optional[Dict[str, Any]]:
 
 def emit_snapshot(db_path: Path) -> Dict[str, Any]:
     """Build and return the canonical snapshot dict."""
-    conn = sqlite3.connect(str(db_path))
-    try:
-        pnl = _query_closed_pnl(conn)
-        cap = _query_capital(conn)
-        risk = _query_open_risk(conn)
-        # thin_linkage needs conn open; gate_summary filled after gate load below.
-        # ts_signal_id may be absent on schema-minimal test DBs — degrade to empty.
-        try:
-            _thin_linkage_raw_rows = conn.execute("""
-                SELECT ticker, ts_signal_id FROM trade_executions
-                WHERE is_close = 0 AND COALESCE(is_synthetic, 0) = 0
-                  AND ts_signal_id IS NOT NULL
-            """).fetchall()
-        except Exception:
-            _thin_linkage_raw_rows = []
-    finally:
-        conn.close()
-
-    capital = cap.get("capital")
-    util = _run_utilization(db_path, capital) if capital else {"error": "no capital"}
-
     gate = _read_gate_artifact()
     gate_summary = None
     if gate:
@@ -244,44 +376,17 @@ def emit_snapshot(db_path: Path) -> Dict[str, Any]:
             "artifact_path": str(gate_path),
         }
 
-    # Build thin_linkage from pre-fetched rows (conn already closed)
-    audit_tsids = _load_audit_tsids(_PRODUCTION_AUDIT_DIR)
-    _tl_covered: Dict[str, int] = {}
-    _tl_legacy = 0
-    _tl_other = 0
-    for _ticker, _tsid in _thin_linkage_raw_rows:
-        _tsid_s = str(_tsid or "").strip()
-        if _tsid_s in audit_tsids:
-            _tl_covered[_ticker] = _tl_covered.get(_ticker, 0) + 1
-        elif _tsid_s.startswith("legacy_"):
-            _tl_legacy += 1
-        else:
-            _tl_other += 1
-    _tl_matched = int((gate_summary or {}).get("matched") or 0)
-    thin_linkage = {
-        "matched_current": _tl_matched,
-        "matched_threshold": _THIN_LINKAGE_THRESHOLD,
-        "matched_needed": max(0, _THIN_LINKAGE_THRESHOLD - _tl_matched),
-        "warmup_deadline": _WARMUP_DEADLINE,
-        "open_lots_total": len(_thin_linkage_raw_rows),
-        "open_lots_with_audit_coverage": sum(_tl_covered.values()),
-        "open_lots_legacy_no_coverage": _tl_legacy,
-        "open_lots_other_no_coverage": _tl_other,
-        "covered_lots_by_ticker": _tl_covered,
-        # Lots with canonical tsids but no production audit file are pipeline defects.
-        # Common causes: audit written to research/ (ETL run) or quarantine/ (hygiene sweep).
-        "pipeline_defects": {
-            "canonical_tsid_lots_without_audit": _tl_other,
-            "action_required": _tl_other > 0,
-        },
-        "note": (
-            "Each covered-lot close increments matched by 1. "
-            "Legacy lots (legacy_ prefix) give 0 credit when they close. "
-            "pipeline_defects.canonical_tsid_lots_without_audit > 0 means audit files exist "
-            "but are in research/ or quarantine/ — not a missing write, a misrouted file. "
-            "Code cannot force closes — only stop/target price action before deadline."
-        ),
-    }
+    conn = sqlite3.connect(str(db_path))
+    try:
+        pnl = _query_closed_pnl(conn)
+        cap = _query_capital(conn)
+        risk = _query_open_risk(conn)
+        thin_linkage = _query_thin_linkage(conn, gate_summary, _FORECAST_AUDIT_ROOT)
+    finally:
+        conn.close()
+
+    capital = cap.get("capital")
+    util = _run_utilization(db_path, capital) if capital else {"error": "no capital"}
 
     # Unattended gate status
     unattended_status = "NOT_CHECKED"
@@ -380,18 +485,40 @@ def main(db: str, output: str, as_json: bool) -> None:
               f"matched={gate.get('matched')}/{gate.get('eligible')}")
     tl = snapshot.get("thin_linkage") or {}
     if tl:
-        covered_str = "  ".join(
-            f"{t}x{n}" for t, n in sorted((tl.get("covered_lots_by_ticker") or {}).items())
-        )
-        print(
-            f"  THIN_LINKAGE       : {tl['matched_current']}/{tl['matched_threshold']} matched  "
-            f"need {tl['matched_needed']} more  deadline={tl['warmup_deadline']}"
-        )
-        print(
-            f"    covered lots     : {tl['open_lots_with_audit_coverage']} ({covered_str})  "
-            f"legacy={tl['open_lots_legacy_no_coverage']}  "
-            f"other={tl['open_lots_other_no_coverage']}"
-        )
+        status = tl.get("status", "ok")
+        matched_current = tl.get("matched_current")
+        matched_threshold = tl.get("matched_threshold")
+        matched_needed = tl.get("matched_needed")
+        deadline = tl.get("warmup_deadline")
+        if status == "ok":
+            covered_str = "  ".join(
+                f"{t}x{n}" for t, n in sorted((tl.get("covered_lots_by_ticker") or {}).items())
+            )
+            print(
+                f"  THIN_LINKAGE       : {matched_current}/{matched_threshold} matched  "
+                f"need {matched_needed} more  deadline={deadline}"
+            )
+            print(
+                f"    covered lots     : {tl['open_lots_with_audit_coverage']} ({covered_str})  "
+                f"legacy={tl['open_lots_legacy_no_coverage']}  "
+                f"other={tl['open_lots_other_no_coverage']}"
+            )
+        else:
+            print(
+                f"  THIN_LINKAGE       : {matched_current}/{matched_threshold} matched  "
+                f"need {matched_needed} more  deadline={deadline}"
+            )
+            print(
+                f"    status           : {status}  "
+                f"{tl.get('query_error') or 'see pipeline_defects'}"
+            )
+            if tl.get("audit_scan_errors"):
+                sample = tl.get("audit_scan_error_sample") or []
+                sample_str = "; ".join(sample[:2]) if sample else "n/a"
+                print(
+                    f"    audit scan errs  : {tl['audit_scan_errors']}  "
+                    f"sample={sample_str}"
+                )
     print(f"\nArtifact: {output}")
 
 
