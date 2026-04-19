@@ -12,6 +12,8 @@ def test_weekly_sleeve_maintenance_runs_nav_sidecar() -> None:
 
     assert "scripts/evaluate_sleeve_promotions.py" in text
     assert "scripts/build_nav_rebalance_plan.py" in text
+    assert "scripts/run_nav_rebalance_handoff.py" in text
     assert "NAV_REBALANCE_PATH" in text
+    assert "NAV_HANDOFF_STATUS_PATH" in text
     assert "--metrics-summary-path" in text
     assert "shadow-first NAV rebalance plan" in text

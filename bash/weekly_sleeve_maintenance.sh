@@ -20,6 +20,7 @@ MIN_TRADES="${MIN_TRADES:-5}"
 SUMMARY_PATH="${SUMMARY_PATH:-logs/automation/sleeve_summary.json}"
 PROMO_PLAN_PATH="${PROMO_PLAN_PATH:-logs/automation/sleeve_promotion_plan.json}"
 NAV_REBALANCE_PATH="${NAV_REBALANCE_PATH:-logs/automation/nav_rebalance_plan_latest.json}"
+NAV_HANDOFF_STATUS_PATH="${NAV_HANDOFF_STATUS_PATH:-logs/automation/nav_rebalance_handoff_latest.json}"
 ELIGIBILITY_PATH="${ELIGIBILITY_PATH:-logs/ticker_eligibility.json}"
 ELIGIBILITY_GATES_PATH="${ELIGIBILITY_GATES_PATH:-logs/ticker_eligibility_gates.json}"
 METRICS_SUMMARY_PATH="${METRICS_SUMMARY_PATH:-visualizations/performance/metrics_summary.json}"
@@ -47,5 +48,13 @@ echo "[weekly_sleeve_maintenance] building shadow-first NAV rebalance plan..."
   --metrics-summary-path "$METRICS_SUMMARY_PATH" \
   --risk-buckets-path "config/risk_buckets.yml" \
   --output "$NAV_REBALANCE_PATH"
+
+echo "[weekly_sleeve_maintenance] evaluating NAV rebalance handoff..."
+"${PYTHON_BIN}" scripts/run_nav_rebalance_handoff.py \
+  --plan-path "$NAV_REBALANCE_PATH" \
+  --config-path "config/barbell.yml" \
+  --output "logs/automation/nav_allocation_latest.json" \
+  --staged-config "config/barbell.staged.yml" \
+  --status-output "$NAV_HANDOFF_STATUS_PATH"
 
 echo "[weekly_sleeve_maintenance] complete. Review $PROMO_PLAN_PATH and $NAV_REBALANCE_PATH before applying config changes."

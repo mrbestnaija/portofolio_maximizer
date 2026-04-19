@@ -60,7 +60,7 @@ The project contains many documents; the following are the **core** ones that sh
 - **Metrics + evaluation definitions (math)**: `Documentation/METRICS_AND_EVALUATION.md`
 - **Evidence-first alpha pipeline**: `Documentation/EVIDENCE_FIRST_ALPHA_PIPELINE_2026-04-18.md` (preprocess validation, evidence-health contracts, provenance, dashboard wiring, robust testing).
 - **Weak-ticker rotation + NAV rebalance plan**: `Documentation/WEAK_TICKER_ROTATION_AND_NAV_REBALANCE_PLAN_2026-04-18.md` (automated demotion/promotion of weak vs strong tickers under evidence-first governance).
-- **Weak-ticker NAV sidecar artifact**: `logs/automation/nav_rebalance_plan_latest.json` (shadow-first output from `scripts/build_nav_rebalance_plan.py`).
+- **Weak-ticker NAV sidecar artifact**: `logs/automation/nav_rebalance_plan_latest.json` (shadow-first output from `scripts/build_nav_rebalance_plan.py`), plus `logs/automation/nav_rebalance_handoff_latest.json` (auto-apply handoff status from `scripts/run_nav_rebalance_handoff.py`).
 - **Ensemble governance (2026-01-11 / refreshed 2026-01-20)**: Ensemble is **enabled** in `config/forecasting_config.yml` with Phase 7.3 tuning (higher SARIMAX order caps, wider SAMOSSA window, stricter MSSA-RL change-point gate). Keep the promotion bar: require ≥20 effective audits with lift_fraction ≥10% vs BEST_SINGLE and violation_rate within cap; disable if those regressions appear in fresh audits.
 - **Profitability remediation playbook**: `Documentation/CRITICAL_PROFITABILITY_ANALYSIS_AND_REMEDIATION_PLAN.md` is the canonical “what broke and how to fix” ledger (synthetic/test contamination, missing exits, remediation gates). Keep it in sync when profitability fixes land.
 

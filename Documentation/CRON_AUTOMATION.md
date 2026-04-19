@@ -66,7 +66,7 @@ Key tasks (first positional argument):
 - `auto_trader_core` â€“ Core tickers with trade-count gate (defaults: AAPL,MSFT,GC=F,COOP; stops once â‰¥30 total and â‰¥10 per-ticker closed trades). Sanitizes `logs/forecast_audits/production/` before the cycle so RMSE-only artifacts do not contaminate live evidence counts.
 - `ticker_discovery_stub` â€“ Placeholder for future Phase 5.2 ticker discovery.
 - `optimizer_stub` â€“ Placeholder for future Phase 5.3 optimizer pipeline.
-- `weekly_sleeve_maintenance` â€“ Sleeve summary + promotion/demotion plan writer, plus the shadow-first NAV rebalance sidecar (see `bash/weekly_sleeve_maintenance.sh`).
+- `weekly_sleeve_maintenance` â€“ Sleeve summary + promotion/demotion plan writer, the shadow-first NAV rebalance sidecar, and the gated auto-apply handoff wrapper (see `bash/weekly_sleeve_maintenance.sh`).
 - `synthetic_refresh` â€“ Generate a synthetic dataset (config-driven) for offline regression/smoke testing; respects `CRON_SYNTHETIC_*` env overrides.
 - `training_priority_cycle` – Prioritized forecaster/LLM training-finetune chain driven by `config/training_priority.yml`.
 - `self_improvement_review_forward` – Forward pending self-improvement proposals to human reviewers via OpenClaw targets (WhatsApp/Discord/Telegram).
