@@ -113,11 +113,12 @@ def _write_valid_canonical_snapshot(path: Path) -> None:
                     "ann_roi_pct": 9.86,
                     "ngn_hurdle_pct": 28.0,
                     "gap_to_hurdle_pp": 18.14,
+                    "evidence_health": "clean",
                     "unattended_gate": "FAIL",
                     "unattended_ready": False,
                 },
                 "utilization": {"roi_ann_pct": 9.86},
-                "gate": {"posture": "WARMUP_COVERED_PASS"},
+                "gate": {"posture": "WARMUP_COVERED_PASS", "gate_artifact_age_minutes": 15.0},
                 "source_contract": {
                     "canonical": {"closed_pnl": "production_closed_trades"},
                     "ui_only": {"metrics_summary": "visualizations/performance/metrics_summary.json"},
@@ -364,6 +365,9 @@ def test_collect_runtime_status_strict_fails_on_inconclusive_allowed_gate(monkey
     monkeypatch.setattr(mod, "DEFAULT_DASHBOARD_PATH", project_root / "visualizations" / "dashboard_data.json")
     monkeypatch.setattr(mod, "DEFAULT_PERSISTENCE_STATUS_PATH", project_root / "logs" / "persistence_manager_status.json")
     monkeypatch.setattr(mod, "DEFAULT_PRODUCTION_GATE_ARTIFACT_PATH", project_root / "logs" / "audit_gate" / "production_gate_latest.json")
+    canonical_snapshot = project_root / "logs" / "canonical_snapshot_latest.json"
+    _write_valid_canonical_snapshot(canonical_snapshot)
+    monkeypatch.setattr(mod, "DEFAULT_CANONICAL_SNAPSHOT_PATH", canonical_snapshot)
     monkeypatch.setattr(mod, "_run_check", fake_run_check)
     monkeypatch.setattr(mod, "_openclaw_exec_environment_check", lambda: {**_base_ok_check("openclaw_exec_env"), "signals": ["exec_env_valid"]})
     monkeypatch.setattr(mod, "_collect_observability_stack_check", lambda timeout_seconds: {**_base_ok_check("observability_stack"), "stack_status": "ok"})
@@ -401,6 +405,9 @@ def test_collect_runtime_status_strict_fails_on_stale_dashboard_payload(monkeypa
     monkeypatch.setattr(mod, "DEFAULT_PERSISTENCE_STATUS_PATH", project_root / "logs" / "persistence_manager_status.json")
     _write_valid_production_gate_artifact(project_root / "logs" / "audit_gate" / "production_gate_latest.json")
     monkeypatch.setattr(mod, "DEFAULT_PRODUCTION_GATE_ARTIFACT_PATH", project_root / "logs" / "audit_gate" / "production_gate_latest.json")
+    canonical_snapshot = project_root / "logs" / "canonical_snapshot_latest.json"
+    _write_valid_canonical_snapshot(canonical_snapshot)
+    monkeypatch.setattr(mod, "DEFAULT_CANONICAL_SNAPSHOT_PATH", canonical_snapshot)
     monkeypatch.setattr(mod, "_run_check", lambda name, cmd, timeout_seconds, **kwargs: _base_ok_check(name))
     monkeypatch.setattr(mod, "_openclaw_exec_environment_check", lambda: {**_base_ok_check("openclaw_exec_env"), "signals": ["exec_env_valid"]})
     monkeypatch.setattr(mod, "_collect_observability_stack_check", lambda timeout_seconds: {**_base_ok_check("observability_stack"), "stack_status": "ok"})
@@ -446,6 +453,9 @@ def test_collect_runtime_status_strict_fails_on_stale_persistence_status(monkeyp
     monkeypatch.setattr(mod, "DEFAULT_PERSISTENCE_STATUS_PATH", stale_status)
     _write_valid_production_gate_artifact(project_root / "logs" / "audit_gate" / "production_gate_latest.json")
     monkeypatch.setattr(mod, "DEFAULT_PRODUCTION_GATE_ARTIFACT_PATH", project_root / "logs" / "audit_gate" / "production_gate_latest.json")
+    canonical_snapshot = project_root / "logs" / "canonical_snapshot_latest.json"
+    _write_valid_canonical_snapshot(canonical_snapshot)
+    monkeypatch.setattr(mod, "DEFAULT_CANONICAL_SNAPSHOT_PATH", canonical_snapshot)
     monkeypatch.setattr(mod, "_run_check", lambda name, cmd, timeout_seconds, **kwargs: _base_ok_check(name))
     monkeypatch.setattr(mod, "_openclaw_exec_environment_check", lambda: {**_base_ok_check("openclaw_exec_env"), "signals": ["exec_env_valid"]})
     monkeypatch.setattr(mod, "_collect_observability_stack_check", lambda timeout_seconds: {**_base_ok_check("observability_stack"), "stack_status": "ok"})
@@ -467,6 +477,9 @@ def test_collect_runtime_status_strict_fails_when_sidecar_stack_disagrees(monkey
     monkeypatch.setattr(mod, "DEFAULT_PERSISTENCE_STATUS_PATH", project_root / "logs" / "persistence_manager_status.json")
     _write_valid_production_gate_artifact(project_root / "logs" / "audit_gate" / "production_gate_latest.json")
     monkeypatch.setattr(mod, "DEFAULT_PRODUCTION_GATE_ARTIFACT_PATH", project_root / "logs" / "audit_gate" / "production_gate_latest.json")
+    canonical_snapshot = project_root / "logs" / "canonical_snapshot_latest.json"
+    _write_valid_canonical_snapshot(canonical_snapshot)
+    monkeypatch.setattr(mod, "DEFAULT_CANONICAL_SNAPSHOT_PATH", canonical_snapshot)
     monkeypatch.setattr(mod, "_run_check", lambda name, cmd, timeout_seconds, **kwargs: _base_ok_check(name))
     monkeypatch.setattr(mod, "_openclaw_exec_environment_check", lambda: {**_base_ok_check("openclaw_exec_env"), "signals": ["exec_env_valid"]})
     monkeypatch.setattr(
@@ -513,3 +526,126 @@ def test_collect_runtime_status_strict_fails_on_bad_canonical_snapshot(monkeypat
     payload = mod.collect_runtime_status(timeout_seconds=1.0, strict=True)
     assert payload["status"] == "degraded"
     assert "strict_canonical_snapshot" in payload["failed_checks"]
+
+
+def test_collect_runtime_status_strict_passes_with_clean_canonical_snapshot(monkeypatch, tmp_path) -> None:
+    project_root = tmp_path / "repo"
+    (project_root / "data").mkdir(parents=True, exist_ok=True)
+    (project_root / "data" / "portfolio_maximizer.db").write_text("", encoding="utf-8")
+    _write_valid_dashboard(project_root / "visualizations" / "dashboard_data.json")
+    _write_valid_persistence_status(project_root / "logs" / "persistence_manager_status.json")
+    _write_valid_production_gate_artifact(project_root / "logs" / "audit_gate" / "production_gate_latest.json")
+    clean_snapshot = project_root / "logs" / "canonical_snapshot_latest.json"
+    _write_valid_canonical_snapshot(clean_snapshot)
+
+    monkeypatch.setattr(mod, "PROJECT_ROOT", project_root)
+    monkeypatch.setattr(mod, "DEFAULT_DASHBOARD_PATH", project_root / "visualizations" / "dashboard_data.json")
+    monkeypatch.setattr(mod, "DEFAULT_PERSISTENCE_STATUS_PATH", project_root / "logs" / "persistence_manager_status.json")
+    monkeypatch.setattr(mod, "DEFAULT_PRODUCTION_GATE_ARTIFACT_PATH", project_root / "logs" / "audit_gate" / "production_gate_latest.json")
+    monkeypatch.setattr(mod, "DEFAULT_CANONICAL_SNAPSHOT_PATH", clean_snapshot)
+    monkeypatch.setattr(mod, "_run_check", lambda name, cmd, timeout_seconds, **kwargs: _base_ok_check(name))
+    monkeypatch.setattr(mod, "_openclaw_exec_environment_check", lambda: {**_base_ok_check("openclaw_exec_env"), "signals": ["exec_env_valid"]})
+    monkeypatch.setattr(mod, "_collect_observability_stack_check", lambda timeout_seconds: {**_base_ok_check("observability_stack"), "stack_status": "ok"})
+
+    payload = mod.collect_runtime_status(timeout_seconds=1.0, strict=True)
+    assert payload["status"] == "ok"
+    strict_canonical = next(check for check in payload["checks"] if check["name"] == "strict_canonical_snapshot")
+    assert strict_canonical["ok"] is True
+    assert strict_canonical["evidence_health"] == "clean"
+    assert strict_canonical["gate_artifact_age_minutes"] == 15.0
+
+
+def test_collect_runtime_status_strict_fails_on_degraded_evidence_health(monkeypatch, tmp_path) -> None:
+    project_root = tmp_path / "repo"
+    (project_root / "data").mkdir(parents=True, exist_ok=True)
+    (project_root / "data" / "portfolio_maximizer.db").write_text("", encoding="utf-8")
+    _write_valid_dashboard(project_root / "visualizations" / "dashboard_data.json")
+    _write_valid_persistence_status(project_root / "logs" / "persistence_manager_status.json")
+    _write_valid_production_gate_artifact(project_root / "logs" / "audit_gate" / "production_gate_latest.json")
+    degraded_snapshot = project_root / "logs" / "canonical_snapshot_latest.json"
+    degraded_snapshot.parent.mkdir(parents=True, exist_ok=True)
+    degraded_snapshot.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "summary": {
+                    "ann_roi_pct": 9.86,
+                    "ngn_hurdle_pct": 28.0,
+                    "gap_to_hurdle_pp": 18.14,
+                    "evidence_health": "degraded",
+                    "unattended_gate": "FAIL",
+                    "unattended_ready": False,
+                },
+                "utilization": {"roi_ann_pct": 9.86},
+                "gate": {"posture": "WARMUP_COVERED_PASS", "gate_artifact_age_minutes": 15.0},
+                "source_contract": {
+                    "canonical": {"closed_pnl": "production_closed_trades"},
+                    "ui_only": {"metrics_summary": "visualizations/performance/metrics_summary.json"},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(mod, "PROJECT_ROOT", project_root)
+    monkeypatch.setattr(mod, "DEFAULT_DASHBOARD_PATH", project_root / "visualizations" / "dashboard_data.json")
+    monkeypatch.setattr(mod, "DEFAULT_PERSISTENCE_STATUS_PATH", project_root / "logs" / "persistence_manager_status.json")
+    monkeypatch.setattr(mod, "DEFAULT_PRODUCTION_GATE_ARTIFACT_PATH", project_root / "logs" / "audit_gate" / "production_gate_latest.json")
+    monkeypatch.setattr(mod, "DEFAULT_CANONICAL_SNAPSHOT_PATH", degraded_snapshot)
+    monkeypatch.setattr(mod, "_run_check", lambda name, cmd, timeout_seconds, **kwargs: _base_ok_check(name))
+    monkeypatch.setattr(mod, "_openclaw_exec_environment_check", lambda: {**_base_ok_check("openclaw_exec_env"), "signals": ["exec_env_valid"]})
+    monkeypatch.setattr(mod, "_collect_observability_stack_check", lambda timeout_seconds: {**_base_ok_check("observability_stack"), "stack_status": "ok"})
+
+    payload = mod.collect_runtime_status(timeout_seconds=1.0, strict=True)
+    assert payload["status"] == "degraded"
+    strict_canonical = next(check for check in payload["checks"] if check["name"] == "strict_canonical_snapshot")
+    assert strict_canonical["ok"] is False
+    assert "degraded_evidence_health:degraded" in strict_canonical["stderr"]
+
+
+def test_collect_runtime_status_strict_fails_on_stale_gate_artifact_minutes(monkeypatch, tmp_path) -> None:
+    project_root = tmp_path / "repo"
+    (project_root / "data").mkdir(parents=True, exist_ok=True)
+    (project_root / "data" / "portfolio_maximizer.db").write_text("", encoding="utf-8")
+    _write_valid_dashboard(project_root / "visualizations" / "dashboard_data.json")
+    _write_valid_persistence_status(project_root / "logs" / "persistence_manager_status.json")
+    _write_valid_production_gate_artifact(project_root / "logs" / "audit_gate" / "production_gate_latest.json")
+    stale_snapshot = project_root / "logs" / "canonical_snapshot_latest.json"
+    stale_snapshot.parent.mkdir(parents=True, exist_ok=True)
+    stale_snapshot.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "summary": {
+                    "ann_roi_pct": 9.86,
+                    "ngn_hurdle_pct": 28.0,
+                    "gap_to_hurdle_pp": 18.14,
+                    "evidence_health": "clean",
+                    "unattended_gate": "FAIL",
+                    "unattended_ready": False,
+                },
+                "utilization": {"roi_ann_pct": 9.86},
+                "gate": {"posture": "WARMUP_COVERED_PASS", "gate_artifact_age_minutes": 120.0},
+                "source_contract": {
+                    "canonical": {"closed_pnl": "production_closed_trades"},
+                    "ui_only": {"metrics_summary": "visualizations/performance/metrics_summary.json"},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(mod, "PROJECT_ROOT", project_root)
+    monkeypatch.setattr(mod, "DEFAULT_DASHBOARD_PATH", project_root / "visualizations" / "dashboard_data.json")
+    monkeypatch.setattr(mod, "DEFAULT_PERSISTENCE_STATUS_PATH", project_root / "logs" / "persistence_manager_status.json")
+    monkeypatch.setattr(mod, "DEFAULT_PRODUCTION_GATE_ARTIFACT_PATH", project_root / "logs" / "audit_gate" / "production_gate_latest.json")
+    monkeypatch.setattr(mod, "DEFAULT_CANONICAL_SNAPSHOT_PATH", stale_snapshot)
+    monkeypatch.setattr(mod, "_run_check", lambda name, cmd, timeout_seconds, **kwargs: _base_ok_check(name))
+    monkeypatch.setattr(mod, "_openclaw_exec_environment_check", lambda: {**_base_ok_check("openclaw_exec_env"), "signals": ["exec_env_valid"]})
+    monkeypatch.setattr(mod, "_collect_observability_stack_check", lambda timeout_seconds: {**_base_ok_check("observability_stack"), "stack_status": "ok"})
+
+    payload = mod.collect_runtime_status(timeout_seconds=1.0, strict=True)
+    assert payload["status"] == "degraded"
+    strict_canonical = next(check for check in payload["checks"] if check["name"] == "strict_canonical_snapshot")
+    assert strict_canonical["ok"] is False
+    assert "stale_gate_artifact:age_minutes=120.00:threshold_minutes=60.00" in strict_canonical["stderr"]

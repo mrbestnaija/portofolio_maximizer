@@ -44,6 +44,7 @@ VALID_SANDBOX_MODES_FOR_SANDBOX_HOST = {"non-main", "all"}
 DEFAULT_DASHBOARD_PATH = PROJECT_ROOT / "visualizations" / "dashboard_data.json"
 DEFAULT_PRODUCTION_GATE_ARTIFACT_PATH = PROJECT_ROOT / "logs" / "audit_gate" / "production_gate_latest.json"
 DEFAULT_CANONICAL_SNAPSHOT_PATH = PROJECT_ROOT / "logs" / "canonical_snapshot_latest.json"
+DEFAULT_CANONICAL_SNAPSHOT_GATE_MAX_AGE_MINUTES = 60.0
 DEFAULT_PERSISTENCE_STATUS_PATH = PROJECT_ROOT / "logs" / "persistence_manager_status.json"
 _PRODUCTION_GATE_SEMANTICS_RE = re.compile(r"semantics=([A-Z_]+)")
 
@@ -341,6 +342,26 @@ def _strict_canonical_snapshot_check() -> dict[str, Any]:
         errors.append("missing_unattended_gate")
     if summary.get("unattended_ready") is None:
         errors.append("missing_unattended_ready")
+    evidence_health = str(summary.get("evidence_health") or "").strip().lower()
+    if not evidence_health:
+        errors.append("missing_evidence_health")
+    elif evidence_health not in {"clean", "ok"}:
+        errors.append(f"degraded_evidence_health:{evidence_health}")
+
+    gate_artifact_age_minutes: float | None = None
+    if gate:
+        try:
+            gate_artifact_age_minutes = float(gate.get("gate_artifact_age_minutes"))
+        except (TypeError, ValueError):
+            gate_artifact_age_minutes = None
+    if gate_artifact_age_minutes is None:
+        errors.append("missing_gate_artifact_age_minutes")
+    elif gate_artifact_age_minutes > DEFAULT_CANONICAL_SNAPSHOT_GATE_MAX_AGE_MINUTES:
+        errors.append(
+            "stale_gate_artifact:"
+            f"age_minutes={gate_artifact_age_minutes:.2f}:"
+            f"threshold_minutes={DEFAULT_CANONICAL_SNAPSHOT_GATE_MAX_AGE_MINUTES:.2f}"
+        )
     if not source_contract:
         errors.append("missing_source_contract")
     else:
@@ -361,12 +382,17 @@ def _strict_canonical_snapshot_check() -> dict[str, Any]:
         stdout=(
             f"schema_version={schema_version} "
             f"ann_roi_pct={ann_roi_value} "
+            f"evidence_health={evidence_health or 'missing'} "
+            f"gate_artifact_age_minutes={gate_artifact_age_minutes} "
             f"unattended_gate={summary.get('unattended_gate') if summary else None} "
             f"posture={gate.get('posture') if gate else None}"
         ),
         stderr="; ".join(errors),
         schema_version=schema_version,
         ann_roi_pct=ann_roi_value,
+        evidence_health=evidence_health or "missing",
+        gate_artifact_age_minutes=gate_artifact_age_minutes,
+        gate_artifact_age_threshold_minutes=DEFAULT_CANONICAL_SNAPSHOT_GATE_MAX_AGE_MINUTES,
         gap_to_hurdle_pp=summary.get("gap_to_hurdle_pp") if summary else None,
         unattended_gate=summary.get("unattended_gate") if summary else None,
         unattended_ready=summary.get("unattended_ready") if summary else None,
