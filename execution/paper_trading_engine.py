@@ -53,6 +53,42 @@ def _infer_asset_class_from_ticker(ticker: str) -> str:
     return "US_EQUITY"
 
 
+def _compute_market_atr(market_data: Optional[pd.DataFrame], period: int = 14) -> Optional[float]:
+    """Best-effort ATR in price units from the latest OHLC bars."""
+    if not isinstance(market_data, pd.DataFrame) or market_data.empty:
+        return None
+    if not {"High", "Low"}.issubset(set(market_data.columns)):
+        return None
+    try:
+        high = pd.to_numeric(market_data["High"], errors="coerce")
+        low = pd.to_numeric(market_data["Low"], errors="coerce")
+        true_range = (high - low).rolling(int(period)).mean()
+        atr = true_range.iloc[-1]
+        if pd.isna(atr):
+            return None
+        atr_f = float(atr)
+        return atr_f if atr_f > 0 else None
+    except Exception:
+        return None
+
+
+def _coerce_optional_int(value: Any) -> Optional[int]:
+    """Best-effort int coercion without silently accepting non-numeric blobs."""
+    try:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return int(value)
+        if isinstance(value, int):
+            return value
+        text = str(value).strip()
+        if not text:
+            return None
+        return int(text)
+    except (TypeError, ValueError):
+        return None
+
+
 @dataclass
 class Trade:
     """Trade execution details"""
@@ -73,8 +109,11 @@ class Trade:
     stop_loss: Optional[float] = None
     target_price: Optional[float] = None
     forecast_horizon: Optional[int] = None
+    effective_horizon: Optional[int] = None
+    ticker_status_snapshot: Optional[str] = None
     max_holding_days_override: Optional[int] = None
     exit_reason: Optional[str] = None
+    entry_atr: Optional[float] = None
     mid_price: Optional[float] = None
     mid_slippage_bps: Optional[float] = None
     data_source: Optional[str] = None
@@ -114,6 +153,7 @@ class Portfolio:
     cash: float
     positions: Dict[str, int] = field(default_factory=dict)  # ticker -> shares
     entry_prices: Dict[str, float] = field(default_factory=dict)  # ticker -> avg entry price
+    entry_atrs: Dict[str, float] = field(default_factory=dict)  # ticker -> entry ATR snapshot
     entry_timestamps: Dict[str, datetime] = field(default_factory=dict)  # ticker -> opened timestamp
     entry_bar_timestamps: Dict[str, datetime] = field(default_factory=dict)  # ticker -> opened bar timestamp
     entry_trade_ids: Dict[str, int] = field(default_factory=dict)  # ticker -> opening trade ID (for audit linkage)
@@ -208,6 +248,7 @@ class PaperTradingEngine:
                     cash=state["cash"],
                     positions=state["positions"],
                     entry_prices=state["entry_prices"],
+                    entry_atrs=state.get("entry_atrs") or {},
                     entry_timestamps=state["entry_timestamps"],
                     stop_losses=state["stop_losses"],
                     target_prices=state["target_prices"],
@@ -838,8 +879,26 @@ class PaperTradingEngine:
             )
         except (TypeError, ValueError):
             max_holding_days_override = None
+        if forecast_horizon is not None and forecast_horizon > 0:
+            cap = int(os.getenv("MAX_HOLDING_DAYS_CAP", "10"))
+            if max_holding_days_override is not None and max_holding_days_override > 0:
+                cap = max(cap, max_holding_days_override)
+            effective_horizon = min(forecast_horizon, cap)
+        else:
+            effective_horizon = None
+
+        entry_atr = signal.get("entry_atr")
+        if entry_atr is None:
+            entry_atr = _compute_market_atr(market_data)
 
         asset_class = _infer_asset_class_from_ticker(ticker)
+        raw_signal_id = signal.get("signal_id")
+        signal_id_ref = _coerce_optional_int(raw_signal_id)
+        ts_signal_id_ref = signal.get("ts_signal_id")
+        if ts_signal_id_ref is None and signal_id_ref is None:
+            raw_signal_text = str(raw_signal_id).strip() if raw_signal_id is not None else ""
+            if raw_signal_text:
+                ts_signal_id_ref = raw_signal_text
         trade = Trade(
             ticker=ticker,
             action=action,
@@ -850,11 +909,13 @@ class PaperTradingEngine:
             bar_timestamp=bar_timestamp,
             is_paper_trade=True,
             slippage=(abs(entry_price - float(current_price)) / float(current_price)) if current_price else 0.0,
-            signal_id=signal.get('signal_id'),
-            ts_signal_id=signal.get('ts_signal_id'),  # Phase 7.13-A2
+            signal_id=signal_id_ref,
+            ts_signal_id=ts_signal_id_ref,  # Phase 7.13-A2
+            ticker_status_snapshot=signal.get("ticker_status_snapshot"),
             stop_loss=signal.get("stop_loss"),
             target_price=signal.get("target_price"),
             forecast_horizon=forecast_horizon,
+            effective_horizon=effective_horizon,
             max_holding_days_override=max_holding_days_override,
             exit_reason=signal.get("exit_reason") if forced_exit_reason else None,
             data_source=data_source,
@@ -868,6 +929,7 @@ class PaperTradingEngine:
             base_confidence=signal.get("base_confidence"),
             effective_confidence=signal.get("confidence"),
             confidence_calibrated=signal.get("confidence_calibrated"),
+            entry_atr=entry_atr,
             is_diagnostic=1 if diag_mode else 0,
             is_synthetic=_forced_is_synthetic if _forced_is_synthetic is not None else (
                 1 if (
@@ -1362,6 +1424,7 @@ class PaperTradingEngine:
             cash=portfolio.cash,
             positions=portfolio.positions.copy(),
             entry_prices=portfolio.entry_prices.copy(),
+            entry_atrs=portfolio.entry_atrs.copy(),
             entry_timestamps=portfolio.entry_timestamps.copy(),
             entry_bar_timestamps=portfolio.entry_bar_timestamps.copy(),
             entry_trade_ids=portfolio.entry_trade_ids.copy(),
@@ -1443,6 +1506,7 @@ class PaperTradingEngine:
         # Lifecycle metadata update (best-effort).
         new_shares = new_portfolio.positions.get(trade.ticker, 0)
         if new_shares == 0:
+            new_portfolio.entry_atrs.pop(trade.ticker, None)
             new_portfolio.entry_timestamps.pop(trade.ticker, None)
             new_portfolio.entry_bar_timestamps.pop(trade.ticker, None)
             new_portfolio.last_bar_timestamps.pop(trade.ticker, None)
@@ -1458,6 +1522,29 @@ class PaperTradingEngine:
                 new_portfolio.entry_bar_timestamps[trade.ticker] = entry_bar_ts
                 new_portfolio.last_bar_timestamps[trade.ticker] = entry_bar_ts
                 new_portfolio.holding_bars[trade.ticker] = 0
+                if trade.entry_atr is not None:
+                    try:
+                        new_portfolio.entry_atrs[trade.ticker] = float(trade.entry_atr)
+                    except (TypeError, ValueError):
+                        pass
+            elif trade.entry_atr is not None:
+                try:
+                    prior_atr = new_portfolio.entry_atrs.get(trade.ticker)
+                    new_atr = float(trade.entry_atr)
+                    if prior_atr is None:
+                        new_portfolio.entry_atrs[trade.ticker] = new_atr
+                    else:
+                        prior_weight = abs(float(old_shares))
+                        trade_weight = abs(float(trade.shares))
+                        total_weight = prior_weight + trade_weight
+                        if total_weight > 0:
+                            new_portfolio.entry_atrs[trade.ticker] = (
+                                float(prior_atr) * prior_weight + new_atr * trade_weight
+                            ) / total_weight
+                        else:
+                            new_portfolio.entry_atrs[trade.ticker] = new_atr
+                except (TypeError, ValueError):
+                    pass
             if trade.stop_loss is not None:
                 try:
                     new_portfolio.stop_losses[trade.ticker] = float(trade.stop_loss)
@@ -1512,6 +1599,7 @@ class PaperTradingEngine:
             holding_bars=self.portfolio.holding_bars,
             entry_bar_timestamps=self.portfolio.entry_bar_timestamps,
             last_bar_timestamps=self.portfolio.last_bar_timestamps,
+            entry_atrs=self.portfolio.entry_atrs,
         )
 
     def _evaluate_exit_reason(
@@ -1543,38 +1631,38 @@ class PaperTradingEngine:
             target_price_f = None
 
         # Trailing stop ratchet — lock in gains once position is meaningfully in profit.
-        # ATR is approximated from the initial stop distance: stop was set at entry ± ATR×2.0,
-        # so effective_atr ≈ |entry - initial_stop| / 2.0. Ratchet updates the persisted
-        # stop_losses entry so the new floor is applied on every subsequent cycle too.
+        # ATR must come from the persisted entry-time snapshot. If that snapshot is
+        # missing (legacy rows), we leave the stop unchanged rather than inferring a
+        # synthetic ATR from the current stop distance.
         entry_price = self.portfolio.entry_prices.get(ticker)
-        if entry_price and stop_loss_f is not None:
-            try:
-                effective_atr = abs(float(entry_price) - stop_loss_f) / 2.0
-            except (TypeError, ValueError):
-                effective_atr = 0.0
-            if effective_atr > 0:
-                if shares > 0:
-                    profit = current_price - float(entry_price)
-                    if profit >= 1.5 * effective_atr:
-                        new_stop = float(entry_price) + 0.5 * effective_atr
-                    elif profit >= 1.0 * effective_atr:
-                        new_stop = float(entry_price)
-                    else:
-                        new_stop = None
-                    if new_stop is not None and new_stop > stop_loss_f:
-                        self.portfolio.stop_losses[ticker] = new_stop
-                        stop_loss_f = new_stop
-                else:  # short position
-                    profit = float(entry_price) - current_price
-                    if profit >= 1.5 * effective_atr:
-                        new_stop = float(entry_price) - 0.5 * effective_atr
-                    elif profit >= 1.0 * effective_atr:
-                        new_stop = float(entry_price)
-                    else:
-                        new_stop = None
-                    if new_stop is not None and new_stop < stop_loss_f:
-                        self.portfolio.stop_losses[ticker] = new_stop
-                        stop_loss_f = new_stop
+        entry_atr = self.portfolio.entry_atrs.get(ticker)
+        try:
+            effective_atr = float(entry_atr) if entry_atr is not None else 0.0
+        except (TypeError, ValueError):
+            effective_atr = 0.0
+        if entry_price and stop_loss_f is not None and effective_atr > 0:
+            if shares > 0:
+                profit = current_price - float(entry_price)
+                if profit >= 1.5 * effective_atr:
+                    new_stop = float(entry_price) + 0.5 * effective_atr
+                elif profit >= 1.0 * effective_atr:
+                    new_stop = float(entry_price)
+                else:
+                    new_stop = None
+                if new_stop is not None and new_stop > stop_loss_f:
+                    self.portfolio.stop_losses[ticker] = new_stop
+                    stop_loss_f = new_stop
+            else:  # short position
+                profit = float(entry_price) - current_price
+                if profit >= 1.5 * effective_atr:
+                    new_stop = float(entry_price) - 0.5 * effective_atr
+                elif profit >= 1.0 * effective_atr:
+                    new_stop = float(entry_price)
+                else:
+                    new_stop = None
+                if new_stop is not None and new_stop < stop_loss_f:
+                    self.portfolio.stop_losses[ticker] = new_stop
+                    stop_loss_f = new_stop
 
         # Stop/target checks are evaluated first (price-based exits).
         if shares > 0:
@@ -1847,6 +1935,7 @@ class PaperTradingEngine:
                 barbell_multiplier=trade.barbell_multiplier,
                 base_confidence=trade.base_confidence,
                 effective_confidence=trade.effective_confidence,
+                effective_horizon=trade.effective_horizon,
                 entry_price=entry_price_ref,
                 exit_price=exit_price_ref,
                 close_size=close_size_ref,
@@ -1861,6 +1950,7 @@ class PaperTradingEngine:
                 is_contaminated=contamination_flag,
                 confidence_calibrated=trade.confidence_calibrated,
                 ts_signal_id=trade.ts_signal_id,  # Phase 7.13-A2
+                ticker_status_snapshot=trade.ticker_status_snapshot,
                 is_forced_exit=trade.is_forced_exit,  # Phase 10
             )
 

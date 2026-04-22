@@ -275,6 +275,7 @@ class TestDatabasePersistenceIntegration:
         assert row['ticker'] == 'TEST'
         assert row['source'] == 'TIME_SERIES'
         assert row['action'] == signal.action
+        assert row['ts_signal_id'] == signal.signal_id
         assert abs(row['confidence'] - signal.confidence) < 0.01
         assert abs(row['entry_price'] - signal.entry_price) < 0.01
 
@@ -426,6 +427,7 @@ class TestEndToEndPipelineIntegration:
         assert row is not None
         assert row['ticker'] == 'TEST'
         assert row['source'] == 'TIME_SERIES'
+        assert row['ts_signal_id'] == signal.signal_id
 
     def test_pipeline_with_signal_routing(self, test_database, sample_price_series, ts_forecast_bundle, ts_signal_generator):
         """Test pipeline with signal routing"""

@@ -113,6 +113,74 @@ def test_execute_signal_executes_and_persists_trade():
     db.close()
 
 
+def test_execute_signal_persists_ticker_status_snapshot():
+    db = DatabaseManager(":memory:")
+    validator = DummyValidator(DummyValidationResult(True, "EXECUTE", 0.9))
+    engine = PaperTradingEngine(
+        initial_capital=10_000.0,
+        slippage_pct=0.0,
+        transaction_cost_pct=0.0,
+        database_manager=db,
+        signal_validator=validator,
+    )
+
+    signal = {
+        "ticker": "AAPL",
+        "action": "BUY",
+        "confidence": 0.82,
+        "signal_id": 77,
+        "ticker_status_snapshot": "HEALTHY",
+    }
+    market_data = make_market_data(120.0)
+    result = engine.execute_signal(signal, market_data)
+
+    assert result.status == "EXECUTED"
+    assert isinstance(result.trade, Trade)
+    assert result.trade.ticker_status_snapshot == "HEALTHY"
+
+    row = db.cursor.execute(
+        "SELECT ticker_status_snapshot FROM trade_executions ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert row["ticker_status_snapshot"] == "HEALTHY"
+
+    db.close()
+
+
+def test_execute_signal_preserves_ts_signal_id_from_legacy_string_signal_id():
+    db = DatabaseManager(":memory:")
+    validator = DummyValidator(DummyValidationResult(True, "EXECUTE", 0.9))
+    engine = PaperTradingEngine(
+        initial_capital=10_000.0,
+        slippage_pct=0.0,
+        transaction_cost_pct=0.0,
+        database_manager=db,
+        signal_validator=validator,
+    )
+
+    ts_signal_id = "ts_AAPL_20260422T090000Z_abcd_0001"
+    signal = {
+        "ticker": "AAPL",
+        "action": "BUY",
+        "confidence": 0.82,
+        "signal_id": ts_signal_id,
+    }
+    market_data = make_market_data(120.0)
+    result = engine.execute_signal(signal, market_data)
+
+    assert result.status == "EXECUTED"
+    assert isinstance(result.trade, Trade)
+    assert result.trade.signal_id is None
+    assert result.trade.ts_signal_id == ts_signal_id
+
+    row = db.cursor.execute(
+        "SELECT signal_id, ts_signal_id FROM trade_executions ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert row["signal_id"] is None
+    assert row["ts_signal_id"] == ts_signal_id
+
+    db.close()
+
+
 def test_execute_signal_uses_last_valid_market_row_when_terminal_close_is_nan():
     db = DatabaseManager(":memory:")
     validator = DummyValidator(DummyValidationResult(True, "EXECUTE", 0.9))

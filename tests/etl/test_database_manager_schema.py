@@ -37,6 +37,45 @@ def _create_legacy_llm_risks_schema(db_path: Path) -> None:
     conn.close()
 
 
+def _create_legacy_trading_signals_schema(db_path: Path) -> None:
+    conn = sqlite3.connect(str(db_path))
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS trading_signals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticker TEXT NOT NULL,
+            signal_date DATE NOT NULL,
+            signal_timestamp TIMESTAMP,
+            action TEXT NOT NULL CHECK(action IN ('BUY', 'SELL', 'HOLD')),
+            source TEXT NOT NULL CHECK(source IN ('TIME_SERIES', 'LLM', 'HYBRID')),
+            model_type TEXT,
+            confidence REAL CHECK(confidence BETWEEN 0 AND 1),
+            entry_price REAL NOT NULL,
+            target_price REAL,
+            stop_loss REAL,
+            expected_return REAL,
+            risk_score REAL,
+            volatility REAL,
+            reasoning TEXT,
+            provenance TEXT,
+            validation_status TEXT DEFAULT 'pending' CHECK(validation_status IN ('pending', 'validated', 'failed', 'executed', 'archived')),
+            actual_return REAL,
+            backtest_annual_return REAL,
+            backtest_sharpe REAL,
+            backtest_alpha REAL,
+            backtest_hit_rate REAL,
+            backtest_profit_factor REAL,
+            latency_seconds REAL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(ticker, signal_date, source, model_type)
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
+
 def test_migrates_risk_level_constraint_to_include_extreme(tmp_path: Path):
     """Existing databases without 'extreme' risk level are upgraded automatically."""
     db_file = tmp_path / "legacy_pm.db"
@@ -99,6 +138,44 @@ def test_save_signal_validation_records_audit_trail(tmp_path: Path):
         assert stored is not None
         assert stored[0] == 'BUY'
         assert 'synthetic warning' in stored[1]
+    finally:
+        manager.conn.close()
+
+
+def test_migrates_trading_signals_ts_signal_id_and_persists_it(tmp_path: Path):
+    db_file = tmp_path / "legacy_trading_signals.db"
+    _create_legacy_trading_signals_schema(db_file)
+
+    manager = DatabaseManager(str(db_file))
+    try:
+        cursor = manager.conn.cursor()
+        cursor.execute("PRAGMA table_info(trading_signals)")
+        columns = {row[1] for row in cursor.fetchall()}
+        assert "ts_signal_id" in columns
+
+        row_id = manager.save_trading_signal(
+            ticker="AAPL",
+            date="2025-10-30",
+            signal={
+                "action": "BUY",
+                "confidence": 0.8,
+                "entry_price": 150.0,
+                "reasoning": "Test case",
+                "ts_signal_id": "ts_AAPL_schema_0001",
+            },
+            model_type="ENSEMBLE",
+            source="TIME_SERIES",
+            validation_status="validated",
+        )
+        assert row_id != -1
+
+        cursor.execute(
+            "SELECT ts_signal_id FROM trading_signals WHERE id = ?",
+            (row_id,),
+        )
+        stored = cursor.fetchone()
+        assert stored is not None
+        assert stored[0] == "ts_AAPL_schema_0001"
     finally:
         manager.conn.close()
 
@@ -381,5 +458,41 @@ def test_performance_summary_filters_by_run_id(tmp_path: Path):
 
         overall = manager.get_performance_summary()
         assert overall["total_trades"] == 3
+    finally:
+        manager.close()
+
+
+def test_trade_execution_persists_ticker_status_snapshot(tmp_path: Path):
+    db_path = tmp_path / "ticker_status.db"
+    manager = DatabaseManager(str(db_path))
+    try:
+        row_id = manager.save_trade_execution(
+            ticker="AAPL",
+            trade_date=datetime(2026, 4, 21),
+            action="BUY",
+            shares=1,
+            price=100.0,
+            total_value=100.0,
+            commission=0.0,
+            run_id="run_status",
+            realized_pnl=1.0,
+            realized_pnl_pct=0.01,
+            ticker_status_snapshot="HEALTHY",
+        )
+        assert row_id != -1
+
+        cursor = manager.conn.cursor()
+        cursor.execute("PRAGMA table_info(trade_executions)")
+        columns = {row[1] for row in cursor.fetchall()}
+        assert "ticker_status_snapshot" in columns
+
+        cursor.execute(
+            "SELECT ticker_status_snapshot, effective_horizon FROM trade_executions WHERE id = ?",
+            (row_id,),
+        )
+        stored = cursor.fetchone()
+        assert stored is not None
+        assert stored[0] == "HEALTHY"
+        assert stored[1] is None
     finally:
         manager.close()

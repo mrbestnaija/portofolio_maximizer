@@ -21,6 +21,13 @@
 - Verified evidence/preprocess contract slice: `159 passed`.
 - Verified repo fast lane: `2534 passed, 6 skipped, 45 deselected, 11 xfailed`.
 
+## Delta (2026-04-22)
+
+- Live-funnel lineage continuity is now preserved end-to-end: `TimeSeriesSignal -> UnifiedSignal -> legacy dict -> PaperTradingEngine -> trade_executions -> trading_signals` keeps `ts_signal_id` intact, while integer `signal_id` remains reserved for LLM/FK use only.
+- `DatabaseManager.save_trading_signal()` now persists `trading_signals.ts_signal_id` and auto-migrates legacy schemas that predate the column, so signal archives remain attributable across restarts instead of losing lineage in the handoff layer.
+- This is a structural evidence-persistence fix, not a threshold or gate change.
+- Verified regression lanes: targeted lineage suite `52 passed`; repo fast lane `2681 selected` with no failures.
+
 ## Phase 7.32 — Adversarial Hardening Round 2 (2026-03-02)
 
 **Regression baseline**: 1489 passed, 1 skipped, 7 xfailed (`pytest -m "not gpu and not slow"`)
