@@ -29,14 +29,35 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 try:
-    from scripts.audit_gate_defaults import FORECAST_AUDIT_MAX_FILES_DEFAULT
+    from scripts.audit_gate_defaults import (
+        FORECAST_AUDIT_MAX_FILES_DEFAULT,
+        FORECAST_AUDIT_OUTCOME_MAX_FILES_DEFAULT,
+    )
 except Exception:  # pragma: no cover - script execution path fallback
-    from audit_gate_defaults import FORECAST_AUDIT_MAX_FILES_DEFAULT
+    from audit_gate_defaults import (
+        FORECAST_AUDIT_MAX_FILES_DEFAULT,
+        FORECAST_AUDIT_OUTCOME_MAX_FILES_DEFAULT,
+    )
 
 try:
     from scripts.telemetry_adapter import normalize_telemetry_payload, telemetry_now_utc
 except Exception:  # pragma: no cover - script execution path fallback
     from telemetry_adapter import normalize_telemetry_payload, telemetry_now_utc
+
+try:
+    from scripts.robustness_thresholds import (
+        LINKAGE_MIN_MATCHED_KEY,
+        LINKAGE_MIN_RATIO_KEY,
+        MIN_SIGNAL_TO_NOISE_KEY,
+        load_floored_thresholds,
+    )
+except Exception:  # pragma: no cover - script execution path fallback
+    from robustness_thresholds import (  # type: ignore
+        LINKAGE_MIN_MATCHED_KEY,
+        LINKAGE_MIN_RATIO_KEY,
+        MIN_SIGNAL_TO_NOISE_KEY,
+        load_floored_thresholds,
+    )
 
 try:
     from etl.paths import DB_PATH as _DEFAULT_DB_PATH
@@ -650,6 +671,24 @@ def _build_failure_dataset_snapshot(
     dedup_map: Dict[Tuple[Any, ...], Tuple[Path, Dict[str, Any]]] = {}
     horizon_filtered_count = 0
 
+    # Load closed-trade match counts BEFORE building the dedup map so that,
+    # when multiple audit files share the same dataset key (same ticker/window/
+    # horizon from re-forecast cycles), the one whose ts_signal_id is confirmed
+    # closed in production_closed_trades wins the tiebreak rather than the
+    # newest-by-mtime file (which may have a different ts_signal_id with no close).
+    outcomes_loaded = False
+    outcome_join_error: Optional[str] = None
+    closed_trade_counts: Dict[str, int] = {}
+    synthetic_tsids: set = set()
+    if db_path is not None:
+        outcomes_loaded, closed_trade_counts, outcome_join_error, synthetic_tsids = _load_closed_trade_match_counts(db_path)
+
+    def _tsid_from_audit(audit: Dict[str, Any]) -> str:
+        sc = audit.get("signal_context")
+        if not isinstance(sc, dict):
+            return ""
+        return str(sc.get("ts_signal_id") or "").strip()
+
     for path in files:
         audit, _ = _load_audit_with_error(path)
         if not audit:
@@ -664,13 +703,16 @@ def _build_failure_dataset_snapshot(
         key = _outcome_dedupe_key_from_audit(audit)
         if key not in dedup_map:
             dedup_map[key] = (path, audit)
-
-    outcomes_loaded = False
-    outcome_join_error: Optional[str] = None
-    closed_trade_counts: Dict[str, int] = {}
-    synthetic_tsids: set = set()
-    if db_path is not None:
-        outcomes_loaded, closed_trade_counts, outcome_join_error, synthetic_tsids = _load_closed_trade_match_counts(db_path)
+        elif outcomes_loaded:
+            # Prefer the audit file that has a confirmed close linkage.
+            # Re-forecast cycles generate new audit files with new ts_signal_ids
+            # for the same dataset window; the linked file must survive dedup.
+            existing_tsid = _tsid_from_audit(dedup_map[key][1])
+            incoming_tsid = _tsid_from_audit(audit)
+            existing_linked = int(closed_trade_counts.get(existing_tsid, 0)) >= 1
+            incoming_linked = int(closed_trade_counts.get(incoming_tsid, 0)) >= 1
+            if incoming_linked and not existing_linked:
+                dedup_map[key] = (path, audit)
 
     now = now_utc()
     dataset_entries: List[Dict[str, Any]] = []
@@ -757,6 +799,16 @@ def _build_failure_dataset_snapshot(
             "signal_context_missing": bool(signal_context.get("signal_context_missing")),
             "dataset_forecast_horizon": ds.get("forecast_horizon"),
             "signal_forecast_horizon": signal_context.get("forecast_horizon"),
+            "entry_price": signal_context.get("entry_price"),
+            "target_price": signal_context.get("target_price"),
+            "stop_loss": signal_context.get("stop_loss"),
+            "entry_atr": signal_context.get("entry_atr"),
+            "effective_horizon": signal_context.get("effective_horizon"),
+            "max_holding_days_override": signal_context.get("max_holding_days_override"),
+            "expected_return": signal_context.get("expected_return"),
+            "expected_return_net": signal_context.get("expected_return_net"),
+            "exit_reason": signal_context.get("exit_reason"),
+            "holding_period_days": signal_context.get("holding_period_days"),
             "expected_close_ts": expected_close.isoformat() if expected_close else None,
             "expected_close_source": expected_close_source,
             "evidence_contract_version": (audit or {}).get("evidence_contract_version"),
@@ -1554,6 +1606,14 @@ def _load_monitoring_thresholds(config_path: Optional[Path]) -> Dict[str, Any]:
 
     raw = yaml.safe_load(config_path.read_text()) or {}
     fm = raw.get("forecaster_monitoring") or {}
+    floored = load_floored_thresholds(config_path)
+    if isinstance(fm, dict):
+        floored_keys = {
+            LINKAGE_MIN_MATCHED_KEY,
+            LINKAGE_MIN_RATIO_KEY,
+            MIN_SIGNAL_TO_NOISE_KEY,
+        }
+        fm = {**fm, **{k: v for k, v in floored.items() if k in floored_keys}}
     return fm
 
 
@@ -1714,7 +1774,10 @@ def main() -> None:
     outcome_audit_roots = _resolve_outcome_audit_roots(audit_dir, bool(args.include_research))
     audit_roots = rmse_audit_roots
     files = _collect_audit_files(audit_roots=rmse_audit_roots, max_files=int(args.max_files))
-    outcome_files = _collect_audit_files(audit_roots=outcome_audit_roots, max_files=int(args.max_files))
+    outcome_files = _collect_audit_files(
+        audit_roots=outcome_audit_roots,
+        max_files=max(int(args.max_files), FORECAST_AUDIT_OUTCOME_MAX_FILES_DEFAULT),
+    )
     if not files:
         roots_text = ", ".join(str(root) for root in rmse_audit_roots)
         _emit_failure_summary_and_exit(
@@ -1926,6 +1989,23 @@ def main() -> None:
         else:
             unique_map[key] = f
 
+    # Pre-load closed-trade match counts so the outcome dedup below can prefer
+    # audit files whose ts_signal_id is confirmed closed.  Re-forecast cycles
+    # produce new audit files with new ts_signal_ids for the same dataset window;
+    # the newest-wins default would otherwise displace the file that links to the
+    # actual close.  Uses private names to avoid colliding with the later
+    # outcome-join variables (which are re-initialised at line ~2256).
+    _dedup_closed_trade_counts: Dict[str, int] = {}
+    _dedup_outcomes_loaded = False
+    if db_path is not None:
+        _dedup_outcomes_loaded, _dedup_closed_trade_counts, _, _ = _load_closed_trade_match_counts(db_path)
+
+    def _tsid_from_audit_file(audit: Dict[str, Any]) -> str:
+        sc = audit.get("signal_context")
+        if not isinstance(sc, dict):
+            return ""
+        return str(sc.get("ts_signal_id") or "").strip()
+
     for f in outcome_files:
         audit, _ = _load_audit_with_error(f)
         if not audit:
@@ -1947,6 +2027,15 @@ def main() -> None:
         outcome_key = _outcome_dedupe_key_from_audit(audit)
         if outcome_key not in outcome_unique_map:
             outcome_unique_map[outcome_key] = f
+        elif _dedup_outcomes_loaded:
+            # Prefer the audit file whose ts_signal_id is confirmed closed.
+            existing_audit = _load_audit(outcome_unique_map[outcome_key])
+            existing_tsid = _tsid_from_audit_file(existing_audit or {})
+            incoming_tsid = _tsid_from_audit_file(audit)
+            existing_linked = int(_dedup_closed_trade_counts.get(existing_tsid, 0)) >= 1
+            incoming_linked = int(_dedup_closed_trade_counts.get(incoming_tsid, 0)) >= 1
+            if incoming_linked and not existing_linked:
+                outcome_unique_map[outcome_key] = f
 
     unique_files: List[Path] = list(unique_map.values())
     outcome_unique_files: List[Path] = list(outcome_unique_map.values())
@@ -2752,6 +2841,16 @@ def main() -> None:
             "signal_context_missing": signal_context_missing,
             "dataset_forecast_horizon": ds.get("forecast_horizon"),
             "signal_forecast_horizon": signal_context.get("forecast_horizon"),
+            "entry_price": signal_context.get("entry_price"),
+            "target_price": signal_context.get("target_price"),
+            "stop_loss": signal_context.get("stop_loss"),
+            "entry_atr": signal_context.get("entry_atr"),
+            "effective_horizon": signal_context.get("effective_horizon"),
+            "max_holding_days_override": signal_context.get("max_holding_days_override"),
+            "expected_return": signal_context.get("expected_return"),
+            "expected_return_net": signal_context.get("expected_return_net"),
+            "exit_reason": signal_context.get("exit_reason"),
+            "holding_period_days": signal_context.get("holding_period_days"),
             "expected_close_ts": expected_close.isoformat() if expected_close else None,
             "expected_close_source": expected_close_source,
             "evidence_contract_version": (audit or {}).get("evidence_contract_version"),
@@ -2798,14 +2897,12 @@ def main() -> None:
 
     if db_path is not None:
         outcome_join_attempted = True
-        closed_trade_counts: Dict[str, int] = {}
-        synthetic_tsids: set = set()
-        outcomes_loaded, closed_trade_counts, outcome_join_error, synthetic_tsids = _load_closed_trade_match_counts(
-            db_path
+        outcomes_loaded, closed_trade_counts, outcome_join_error, synthetic_tsids = (
+            _load_closed_trade_match_counts(db_path)
         )
-        if outcomes_loaded:
-            now = now_utc()
-            for entry in dataset_entries:
+    if outcomes_loaded:
+        now = now_utc()
+        for entry in dataset_entries:
                 if bool(entry.get("misrouted_rmse_only_record")):
                     entry["outcome_status"] = "INVALID_CONTEXT"
                     entry["outcome_reason"] = "MISROUTED_RMSE_ONLY_AUDIT"
@@ -3115,6 +3212,53 @@ def main() -> None:
         f"trading_days={diversity['distinct_trading_days']}"
     )
 
+    def _finite_float(raw: Any) -> Optional[float]:
+        try:
+            if raw in (None, "", [], {}):
+                return None
+            value = float(raw)
+        except Exception:
+            return None
+        if value != value or abs(value) == float("inf"):
+            return None
+        return value
+
+    amplitude_entries: List[Dict[str, Any]] = []
+    for entry in dataset_entries:
+        if str(entry.get("outcome_status") or "").strip().upper() != "MATCHED":
+            continue
+        entry_price = _finite_float(entry.get("entry_price"))
+        target_price = _finite_float(entry.get("target_price"))
+        expected_return = _finite_float(entry.get("expected_return_net"))
+        if expected_return is None:
+            expected_return = _finite_float(entry.get("expected_return"))
+        if entry_price is None or target_price is None or expected_return is None:
+            continue
+        if abs(entry_price) <= 1e-9:
+            continue
+        target_fraction = abs(target_price - entry_price) / max(abs(entry_price), 1e-9)
+        amplitude_entries.append(
+            {
+                "entry_price": entry_price,
+                "target_price": target_price,
+                "expected_return": expected_return,
+                "target_fraction": target_fraction,
+                "hit": abs(expected_return) >= target_fraction,
+            }
+        )
+
+    target_amplitude_support = len(amplitude_entries)
+    target_amplitude_hit_count = sum(1 for item in amplitude_entries if item["hit"])
+    target_amplitude_hit_rate = (
+        target_amplitude_hit_count / target_amplitude_support if target_amplitude_support else None
+    )
+    recent_amplitude_entries = amplitude_entries[-20:] if amplitude_entries else []
+    target_amplitude_hit_rate_rolling_20 = (
+        sum(1 for item in recent_amplitude_entries if item["hit"]) / len(recent_amplitude_entries)
+        if recent_amplitude_entries
+        else None
+    )
+
     summary = {
         "audit_dir": str(audit_dir),
         "audit_roots": [str(root) for root in audit_roots],
@@ -3165,6 +3309,10 @@ def main() -> None:
         "recent_window_max_violation_rate": recent_window_max_violation_rate,
         "recent_rmse_ratio_p90": recent_pct.get(0.9) if recent_pct else None,
         "recent_window_max_p90_rmse_ratio": recent_window_max_p90_rmse_ratio,
+        "target_amplitude_hit_count": target_amplitude_hit_count,
+        "target_amplitude_support": target_amplitude_support,
+        "target_amplitude_hit_rate": target_amplitude_hit_rate,
+        "target_amplitude_hit_rate_rolling_20": target_amplitude_hit_rate_rolling_20,
         "admission_summary": admission_summary,
         "outcome_join": {
             "db_path": str(db_path) if db_path is not None else None,
