@@ -60,7 +60,7 @@ pandas-datareader==0.10.0
 pandas_market_calendars>=5.3.2,<6
 patsy==1.0.2
 peewee==3.18.3
-pillow==12.1.1
+pillow==12.2.0
 platformdirs==4.9.2
 pluggy==1.6.0
 pre-commit==4.5.1
