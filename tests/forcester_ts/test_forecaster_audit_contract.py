@@ -787,6 +787,80 @@ def test_load_trailing_oos_metrics_finds_match_beyond_position_20(
     assert "samossa" in result, f"Expected samossa metrics in AAPL audit; got keys: {list(result)}"
 
 
+def test_load_trailing_oos_metrics_prefers_primary_dir_over_nearby_timestamps(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Primary production audits must win over near-equal research timestamps.
+
+    The production bug this guards against is a global mtime preference that can
+    accidentally select a research/ CV audit when NTFS timestamps are only a few
+    milliseconds apart. Directory priority must remain stronger than mtime.
+    """
+    import os
+    import time
+
+    production_dir = tmp_path / "production"
+    production_dir.mkdir()
+    research_dir = tmp_path / "research"
+    research_dir.mkdir()
+
+    production_path = production_dir / "forecast_audit_aapl_primary.json"
+    research_path = research_dir / "forecast_audit_aapl_research.json"
+
+    production_path.write_text(
+        json.dumps(
+            {
+                "dataset": {"ticker": "AAPL", "forecast_horizon": 30, "length": 100},
+                "artifacts": {
+                    "evaluation_metrics": {
+                        "samossa": {"rmse": 11.1, "directional_accuracy": 0.61, "n_observations": 30},
+                        "garch": {"rmse": 9.4, "directional_accuracy": 0.58, "n_observations": 30},
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    research_path.write_text(
+        json.dumps(
+            {
+                "dataset": {"ticker": "AAPL", "forecast_horizon": 30, "length": 100},
+                "artifacts": {
+                    "evaluation_metrics": {
+                        "samossa": {"rmse": 19.9, "directional_accuracy": 0.12, "n_observations": 30},
+                        "garch": {"rmse": 17.7, "directional_accuracy": 0.18, "n_observations": 30},
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    base = time.time()
+    os.utime(production_path, (base, base))
+    os.utime(research_path, (base + 0.007, base + 0.007))
+
+    monkeypatch.setenv("TS_FORECAST_AUDIT_DIR", str(production_dir))
+    config = TimeSeriesForecasterConfig(
+        sarimax_enabled=False,
+        garch_enabled=False,
+        samossa_enabled=False,
+        mssa_rl_enabled=False,
+        ensemble_enabled=False,
+    )
+    forecaster = TimeSeriesForecaster(config=config)
+    index = pd.date_range("2024-01-01", periods=60, freq="D")
+    forecaster.fit(pd.Series(list(range(60)), dtype=float, index=index), ticker="AAPL")
+    forecaster._instrumentation.set_dataset_metadata(forecast_horizon=30)
+
+    result = forecaster._load_trailing_oos_metrics()
+
+    assert result, "Expected production audit metrics when primary dir has the right ticker/horizon"
+    assert result["samossa"]["rmse"] == 11.1
+    assert forecaster._oos_selection_health.get("source_kind") == "disk_production"
+    assert Path(forecaster._oos_selection_health.get("source_path") or "").name == production_path.name
+
+
 def test_load_trailing_oos_metrics_warns_when_no_match(
     monkeypatch, tmp_path: Path, caplog: "pytest.LogCaptureFixture"
 ) -> None:

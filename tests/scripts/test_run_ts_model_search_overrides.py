@@ -34,10 +34,10 @@ class DummyRollingValidator:
 
     def run(self, price_series: pd.Series, returns_series: pd.Series) -> Dict[str, Any]:
         # Two folds with slightly different RMSE values to exercise stability logic.
-        aggregate_metrics = {"combined": {"rmse": 1.0}}
+        aggregate_metrics = {"combined": {"rmse": 1.0, "target_amplitude_hit_rate": 0.75}}
         folds: List[Dict[str, Any]] = [
-            {"metrics": {"combined": {"rmse": 1.0}}},
-            {"metrics": {"combined": {"rmse": 1.1}}},
+            {"metrics": {"combined": {"rmse": 1.0, "target_amplitude_hit_rate": 0.75}}},
+            {"metrics": {"combined": {"rmse": 1.1, "target_amplitude_hit_rate": 0.75}}},
         ]
         return {"aggregate_metrics": aggregate_metrics, "folds": folds}
 
@@ -148,6 +148,7 @@ def test_run_ts_model_search_uses_overrides_and_persists_candidates(
         step_size=10,
         max_folds=2,
         use_profiles=True,
+        regime_similarity_path=str(Path(__file__).resolve().parents[2] / "config" / "regime_similarity_weights.yml"),
         verbose=False,
     )
 
@@ -160,3 +161,14 @@ def test_run_ts_model_search_uses_overrides_and_persists_candidates(
     assert saved_candidates, "No TS model candidates were persisted in the smoke test."
     # All saved entries should be for the requested ticker.
     assert all(cand["ticker"] == "AAPL" for cand in saved_candidates)
+    assert all("target_amplitude_hit_rate" in cand["metrics"] for cand in saved_candidates)
+
+
+def test_regime_similarity_matrix_keeps_crisis_defensive() -> None:
+    matrix = ts_search._load_regime_similarity_weights(
+        Path(__file__).resolve().parents[2] / "config" / "regime_similarity_weights.yml"
+    )
+    assert matrix["CRISIS"]["HIGH_VOL_TRENDING"] == 0.2
+    assert matrix["HIGH_VOL_TRENDING"]["CRISIS"] == 0.2
+    assert matrix["CRISIS"]["LIQUID_RANGEBOUND"] == 0.1
+    assert matrix["CRISIS"]["MODERATE_TRENDING"] == 0.2

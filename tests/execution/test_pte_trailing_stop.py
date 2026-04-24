@@ -32,6 +32,7 @@ def _make_engine_with_position(
     portfolio.stop_losses[ticker] = initial_stop
     portfolio.target_prices[ticker] = target_price
     portfolio.max_holding_days[ticker] = max_holding_days
+    portfolio.entry_atrs[ticker] = abs(entry_price - initial_stop) / 2.0
     portfolio.holding_bars[ticker] = 1
     portfolio.entry_timestamps[ticker] = datetime(2026, 1, 1, tzinfo=timezone.utc)
     portfolio.entry_bar_timestamps[ticker] = datetime(2026, 1, 1, tzinfo=timezone.utc)

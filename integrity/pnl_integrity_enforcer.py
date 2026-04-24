@@ -22,8 +22,11 @@ Safe to instantiate multiple times (read-only queries, idempotent views).
 import logging
 import os
 import sqlite3
+import shutil
+import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from integrity.sqlite_guardrails import apply_sqlite_guardrails, guarded_sqlite_connect
@@ -178,8 +181,10 @@ class PnLIntegrityEnforcer:
             raise FileNotFoundError(f"Database not found: {db_path}")
 
         self.db_path = db_path
+        self._working_db_path = self._resolve_working_db_path(Path(db_path))
+        self._using_posix_mirror = self._working_db_path != Path(db_path)
         self.conn = guarded_sqlite_connect(
-            db_path,
+            str(self._working_db_path),
             enable_guardrails=False,
         )
         self.conn.row_factory = sqlite3.Row
@@ -217,11 +222,47 @@ class PnLIntegrityEnforcer:
             if self._guardrails_hard_fail:
                 raise RuntimeError(f"SQLite guardrails setup failed: {exc}") from exc
 
+    def _resolve_working_db_path(self, db_path: Path) -> Path:
+        """Return a WSL-safe working copy for Windows-mounted SQLite paths."""
+        path = db_path.expanduser()
+        if os.name != "posix":
+            return path
+        if not str(path).startswith("/mnt/"):
+            return path
+
+        tmp_root = Path(os.environ.get("WSL_SQLITE_TMP", tempfile.gettempdir()))
+        tmp_root.mkdir(parents=True, exist_ok=True)
+        mirror_path = tmp_root / f"{path.name}.wsl"
+        try:
+            if path.exists():
+                shutil.copy2(path, mirror_path)
+            else:
+                mirror_path.touch()
+            logger.info(
+                "Operating PnLIntegrityEnforcer on temporary SQLite mirror %s for %s.",
+                mirror_path,
+                path,
+            )
+            return mirror_path
+        except OSError as exc:
+            logger.warning(
+                "Could not stage WSL SQLite mirror for %s (%s); falling back to direct path.",
+                path,
+                exc,
+            )
+            return path
+
     def close(self):
         """Close the database connection."""
         if self.conn:
             self.conn.close()
             self.conn = None
+        if self._using_posix_mirror:
+            try:
+                self._working_db_path.unlink()
+            except OSError:
+                logger.debug("Unable to remove SQLite mirror %s", self._working_db_path)
+            self._working_db_path = Path(self.db_path)
 
     def __enter__(self):
         return self
@@ -268,6 +309,55 @@ class PnLIntegrityEnforcer:
         self.conn.execute(VIEW_PRODUCTION_CLOSED_TRADES)
         self.conn.execute(VIEW_ROUND_TRIPS)
         self.conn.commit()
+
+    def _load_active_inventory_by_ticker(self) -> tuple[Dict[str, float], str]:
+        """Return the authoritative live inventory snapshot by ticker.
+
+        ``portfolio_state`` is the cross-session persistence source written by the
+        trading engine at resume/save time. ``portfolio_positions`` is a dashboard
+        view and may lag the live state, so we only use it as a fallback for older
+        databases that have not been migrated yet.
+        """
+        sources = (
+            ("portfolio_state", "SELECT ticker, COALESCE(shares, 0.0) AS shares FROM portfolio_state"),
+            ("portfolio_positions", "SELECT ticker, COALESCE(shares, 0.0) AS shares FROM portfolio_positions"),
+        )
+        for table_name, query in sources:
+            try:
+                has_table = self.conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
+                    (table_name,),
+                ).fetchone()
+                if not has_table:
+                    continue
+
+                rows = self.conn.execute(query).fetchall()
+                inventory: Dict[str, float] = {}
+                for row in rows:
+                    ticker = str(row["ticker"] or "").strip()
+                    if not ticker:
+                        continue
+                    try:
+                        qty = float(row["shares"] or 0.0)
+                    except Exception:
+                        continue
+                    if qty > 0:
+                        inventory[ticker] = qty
+
+                # ``portfolio_state`` is authoritative even when flat, so return
+                # immediately once we have a valid snapshot from that table.
+                if table_name == "portfolio_state":
+                    return inventory, table_name
+                if inventory:
+                    return inventory, table_name
+            except Exception:
+                logger.debug(
+                    "Skipping %s reconciliation for orphan checks",
+                    table_name,
+                    exc_info=True,
+                )
+
+        return {}, "none"
 
     # ------------------------------------------------------------------
     # Canonical metrics -- single source of truth
@@ -587,24 +677,10 @@ class PnLIntegrityEnforcer:
                 if idx > 0:
                     fifo_by_ticker[symbol] = queue[idx:]
 
-        # Optional portfolio-level reconciliation: if portfolio_positions exists
-        # and reports open shares, treat those as expected active inventory first.
-        open_shares_by_ticker: Dict[str, float] = {}
-        try:
-            has_positions = self.conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='portfolio_positions' LIMIT 1"
-            ).fetchone()
-            if has_positions:
-                open_rows = self.conn.execute(
-                    "SELECT ticker, COALESCE(shares, 0.0) AS shares FROM portfolio_positions"
-                ).fetchall()
-                for row in open_rows:
-                    qty = float(row["shares"] or 0.0)
-                    if qty <= 0:
-                        continue
-                    open_shares_by_ticker[str(row["ticker"])] = qty
-        except Exception:
-            logger.debug("Skipping portfolio_positions reconciliation for orphan checks", exc_info=True)
+        # ``portfolio_state`` is the authoritative live inventory snapshot. Fall
+        # back to ``portfolio_positions`` only for legacy databases that have not
+        # yet been migrated to session persistence.
+        open_shares_by_ticker, inventory_source = self._load_active_inventory_by_ticker()
 
         now_utc = datetime.now(timezone.utc)
         problematic: List[Dict[str, Any]] = []

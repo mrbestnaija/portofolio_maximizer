@@ -76,6 +76,17 @@ Key tasks (first positional argument):
 
 - ETL and auto_trader runs now emit `logs/automation/db_provenance_<run>.json` (run_id, dataset_id, origin, generator_version) for auditability and dashboard badges. Dashboards with `data_origin=synthetic` or `mixed` are explicitly **not profitability proof artifacts**; use the badge to gate promotions.
 
+### Automation-readiness snapshot
+
+- The `auto_trader` and `auto_trader_core` cron paths refresh the evidence bundle after each cycle:
+  - `logs/canonical_snapshot_latest.json`
+  - `logs/automation/tp_contingency_latest.json`
+  - `visualizations/dashboard_data.json`
+  - `logs/audit_gate/production_gate_latest.json`
+  - `logs/runtime_status_latest.json`
+- `logs/runtime_status_latest.json` is the operator-facing readiness snapshot. It now includes `automation_ready_for_thin_linkage`, which is true only when the latest cycle is not quarantined, the canonical snapshot is schema-v4 fresh and valid, and THIN_LINKAGE still needs additional matched closes.
+- The weekly sleeve wrapper now module-runs `scripts.build_nav_rebalance_plan` so the NAV sidecar stays import-path safe under WSL `simpleTrader_env`.
+
 The script automatically:
 
 - Resolves `PROJECT_ROOT` from its own location.

@@ -27,6 +27,7 @@ from datetime import datetime, timezone
 from dataclasses import dataclass, field
 
 from etl.timestamp_utils import utc_now
+from etl.env_flags import is_synthetic_mode
 from utils.weather_context import extract_weather_context
 
 from etl.time_series_forecaster import (
@@ -56,6 +57,17 @@ except Exception:  # pragma: no cover
     resolve_barbell_bucket = None  # type: ignore
     build_barbell_market_context = None  # type: ignore
     evaluate_barbell_path_risk = None  # type: ignore
+
+try:
+    from scripts.robustness_thresholds import (
+        MIN_SIGNAL_TO_NOISE_KEY,
+        load_floored_thresholds,
+    )
+except Exception:  # pragma: no cover - keep generator usable in direct execution
+    from robustness_thresholds import (  # type: ignore
+        MIN_SIGNAL_TO_NOISE_KEY,
+        load_floored_thresholds,
+    )
 
 try:  # pragma: no cover - optional import for execution references
     from execution.order_manager import request_safe_price
@@ -233,10 +245,19 @@ class TimeSeriesSignalGenerator:
                     self._default_roundtrip_cost_bps[str(key).upper()] = float(value)
                 except (TypeError, ValueError):
                     continue
+        floored_routing = load_floored_thresholds(Path("config/signal_routing_config.yml"))
         try:
-            self._min_signal_to_noise = float(self._cost_model.get("min_signal_to_noise", 0.0) or 0.0)
+            raw_snr = float(
+                self._cost_model.get(
+                    MIN_SIGNAL_TO_NOISE_KEY,
+                    floored_routing.get(MIN_SIGNAL_TO_NOISE_KEY, 1.5),
+                )
+                or 0.0
+            )
         except (TypeError, ValueError):
-            self._min_signal_to_noise = 0.0
+            raw_snr = float(floored_routing.get(MIN_SIGNAL_TO_NOISE_KEY, 1.5) or 1.5)
+        self._min_signal_to_noise = max(raw_snr, float(floored_routing.get(MIN_SIGNAL_TO_NOISE_KEY, 1.5) or 1.5))
+        self._cost_model[MIN_SIGNAL_TO_NOISE_KEY] = self._min_signal_to_noise
         self._quant_validation_config_path = (
             Path(quant_validation_config_path).expanduser()
             if quant_validation_config_path
@@ -553,9 +574,12 @@ class TimeSeriesSignalGenerator:
                 )
                 if isinstance(routing_cm, dict):
                     # Only pull scalar gate params; don't override LOB depth profiles
-                    for key in ("min_signal_to_noise", "default_roundtrip_cost_bps"):
+                    for key in (MIN_SIGNAL_TO_NOISE_KEY, "default_roundtrip_cost_bps"):
                         if key in routing_cm and key not in result:
                             result[key] = routing_cm[key]
+                    floors = load_floored_thresholds(src_path)
+                    if MIN_SIGNAL_TO_NOISE_KEY in floors:
+                        result[MIN_SIGNAL_TO_NOISE_KEY] = float(floors[MIN_SIGNAL_TO_NOISE_KEY])
             except Exception as exc:  # pragma: no cover
                 logger.debug("Unable to load signal routing cost model: %s", exc)
 
@@ -3929,10 +3953,13 @@ class TimeSeriesSignalGenerator:
             action = str(entry.get("action", "")).upper()
             if action and action not in {"BUY", "SELL"}:
                 continue
-            # Exclude synthetic execution entries — mirrors the DB tier's
-            # `is_synthetic=0` filter so both tiers train on production signals only.
+            # Exclude synthetic execution entries using the canonical helper so
+            # the JSONL tier matches the execution/DB provenance contract.
             exec_mode = str(entry.get("execution_mode") or "").lower()
-            if exec_mode == "synthetic":
+            data_source_hint = entry.get("data_source")
+            if data_source_hint is None and isinstance(entry.get("market_context"), dict):
+                data_source_hint = entry["market_context"].get("data_source")
+            if is_synthetic_mode(execution_mode=exec_mode or None, data_source=data_source_hint):
                 continue
             # Prefer raw_confidence (pre-blend) so LR trains on the same distribution
             # that predict_proba is evaluated on.  Fall back to blended 'confidence'

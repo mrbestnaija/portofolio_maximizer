@@ -17,7 +17,7 @@ def test_sanitize_cron_jobs_payload_rewrites_legacy_python_paths_and_backfills_s
                 },
                 "delivery": {
                     "channel": "whatsapp",
-                    "fallback": {"channel": "telegram", "to": "+2347"},
+                    "fallback": {"channel": "telegram", "to": "telegram:6515478488"},
                 },
             }
         ]
@@ -53,7 +53,7 @@ def test_summarize_cron_jobs_counts_stale_python_paths() -> None:
                     },
                     "delivery": {
                         "channel": "whatsapp",
-                        "fallback": {"channel": "telegram", "to": "+2347"},
+                        "fallback": {"channel": "telegram", "to": "telegram:6515478488"},
                     },
                 }
             ]
@@ -63,4 +63,5 @@ def test_summarize_cron_jobs_counts_stale_python_paths() -> None:
     assert summary["status"] == "OK"
     assert summary["invalid_session_target_count"] == 0
     assert summary["delivery_fallback_ready_count"] == 1
+    assert summary["delivery_fallback_invalid_count"] == 0
     assert summary["stale_python_path_count"] == 1

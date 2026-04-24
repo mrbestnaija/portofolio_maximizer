@@ -40,8 +40,58 @@ run_with_logging() {
 }
 
 emit_canonical_snapshot() {
+  if [[ ! -f "config/canonical_source_registry.yml" ]]; then
+    echo "[CRON] canonical_source_registry.yml missing; refusing to emit canonical snapshot." >&2
+    return 1
+  fi
   run_with_logging "emit_canonical_snapshot: emit_canonical_snapshot.py" \
     "${PYTHON_BIN}" scripts/emit_canonical_snapshot.py
+}
+
+generate_tp_contingency() {
+  run_with_logging "tp_contingency: outcome_linkage_attribution_report.py" \
+    "${PYTHON_BIN}" scripts/outcome_linkage_attribution_report.py \
+      --output logs/automation/tp_contingency_latest.json
+}
+
+emit_runtime_status() {
+  local runtime_status_path="${PROJECT_ROOT}/logs/runtime_status_latest.json"
+  local runtime_output=""
+  local rc=0
+
+  if runtime_output="$("${PYTHON_BIN}" scripts/project_runtime_status.py --pretty)"; then
+    rc=0
+  else
+    rc=$?
+  fi
+
+  if [[ -z "${runtime_output}" ]]; then
+    echo "[CRON] project_runtime_status.py produced no output." >&2
+    return 1
+  fi
+
+  printf '%s\n' "${runtime_output}" > "${runtime_status_path}"
+  {
+    echo "[CRON] $(date -Iseconds) :: runtime_status: project_runtime_status.py"
+    printf '%s\n' "${runtime_output}"
+  } >> "${LOG_FILE}" 2>&1
+
+  return "${rc}"
+}
+
+emit_dashboard_bridge() {
+  run_with_logging "dashboard_db_bridge: dashboard_db_bridge.py" \
+    "${PYTHON_BIN}" scripts/dashboard_db_bridge.py
+}
+
+emit_production_gate() {
+  run_with_logging "production_audit_gate: production_audit_gate.py" \
+    "${PYTHON_BIN}" scripts/production_audit_gate.py --unattended-profile
+}
+
+family_calibration() {
+  run_with_logging "family_calibration: family_calibration_writer.py" \
+    "${PYTHON_BIN}" scripts/family_calibration_writer.py "$@"
 }
 
 reconcile_platt_outcomes() {
@@ -87,12 +137,33 @@ case "${TASK}" in
     # High-frequency trading loop (paper trading engine).
     # Intended to be run every N minutes; behaviour is driven by
     # scripts/run_auto_trader.py and config/pipeline_config.yml.
+    cycle_rc=0
     run_with_logging "auto_trader: run_auto_trader.py" \
       "${PYTHON_BIN}" scripts/run_auto_trader.py "$@"
     reconcile_platt_outcomes
     if ! emit_canonical_snapshot; then
       echo "[CRON] emit_canonical_snapshot failed after auto_trader." >&2
+      cycle_rc=1
     fi
+    if ! generate_tp_contingency; then
+      echo "[CRON] tp_contingency report failed after auto_trader." >&2
+    fi
+    if ! emit_dashboard_bridge; then
+      echo "[CRON] dashboard_db_bridge failed after auto_trader." >&2
+    fi
+    if ! emit_production_gate; then
+      echo "[CRON] production_audit_gate failed after auto_trader." >&2
+      cycle_rc=1
+    fi
+    if ! emit_runtime_status; then
+      echo "[CRON] project_runtime_status failed after auto_trader." >&2
+      cycle_rc=1
+    fi
+    exit "${cycle_rc}"
+    ;;
+
+  family_calibration)
+    family_calibration "$@"
     ;;
 
   auto_trader_core)
@@ -148,9 +219,26 @@ PY
     run_with_logging "auto_trader_core: run_auto_trader.py (tickers=${CORE_TICKERS})" \
       "${PYTHON_BIN}" scripts/run_auto_trader.py --tickers "${CORE_TICKERS}" "$@"
     reconcile_platt_outcomes
+    cycle_rc=0
     if ! emit_canonical_snapshot; then
       echo "[CRON] emit_canonical_snapshot failed after auto_trader_core." >&2
+      cycle_rc=1
     fi
+    if ! generate_tp_contingency; then
+      echo "[CRON] tp_contingency report failed after auto_trader_core." >&2
+    fi
+    if ! emit_dashboard_bridge; then
+      echo "[CRON] dashboard_db_bridge failed after auto_trader_core." >&2
+    fi
+    if ! emit_production_gate; then
+      echo "[CRON] production_audit_gate failed after auto_trader_core." >&2
+      cycle_rc=1
+    fi
+    if ! emit_runtime_status; then
+      echo "[CRON] project_runtime_status failed after auto_trader_core." >&2
+      cycle_rc=1
+    fi
+    exit "${cycle_rc}"
     ;;
 
   sanitize_forecast_audits)

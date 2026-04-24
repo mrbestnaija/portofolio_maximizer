@@ -86,6 +86,7 @@ def test_handoff_invokes_apply_when_live_apply_allowed(tmp_path: Path, monkeypat
     output_path = tmp_path / "logs" / "automation" / "nav_allocation_latest.json"
     status_path = tmp_path / "logs" / "automation" / "nav_rebalance_handoff_latest.json"
     staged_config_path = tmp_path / "config" / "barbell.staged.yml"
+    canonical_snapshot_path = tmp_path / "logs" / "canonical_snapshot_latest.json"
 
     _write_json(
         plan_path,
@@ -112,15 +113,32 @@ barbell:
     symbols: ["NVDA"]
 """.strip(),
     )
+    _write_json(
+        canonical_snapshot_path,
+        {
+            "thin_linkage": {"matched_current": 10},
+            "gate": {"matched": 10},
+        },
+    )
 
     def _fake_run(cmd, capture_output, text):
         assert cmd[0] == str(sys.executable)
-        assert cmd[1].endswith("scripts\\apply_nav_reallocation.py") or cmd[1].endswith("scripts/apply_nav_reallocation.py")
-        assert "--plan-path" in cmd
-        assert "--config-path" in cmd
-        assert "--output" in cmd
-        assert "--staged-config" in cmd
-        return subprocess.CompletedProcess(cmd, 0, stdout="apply ok\n", stderr="")
+        if cmd[1].endswith("scripts\\apply_nav_reallocation.py") or cmd[1].endswith("scripts/apply_nav_reallocation.py"):
+            assert "--plan-path" in cmd
+            assert "--config-path" in cmd
+            assert "--output" in cmd
+            assert "--staged-config" in cmd
+            return subprocess.CompletedProcess(cmd, 0, stdout="apply ok\n", stderr="")
+        if cmd[1].endswith("scripts\\emit_canonical_snapshot.py") or cmd[1].endswith("scripts/emit_canonical_snapshot.py"):
+            _write_json(
+                canonical_snapshot_path,
+                {
+                    "thin_linkage": {"matched_current": 10},
+                    "gate": {"matched": 10},
+                },
+            )
+            return subprocess.CompletedProcess(cmd, 0, stdout="emit ok\n", stderr="")
+        raise AssertionError(f"Unexpected subprocess call: {cmd}")
 
     monkeypatch.setattr(mod.subprocess, "run", _fake_run)
 
@@ -130,6 +148,7 @@ barbell:
         output_path=output_path,
         staged_config_path=staged_config_path,
         status_path=status_path,
+        canonical_snapshot_path=canonical_snapshot_path,
     )
 
     assert result["status"] == "APPLIED"
@@ -144,6 +163,88 @@ barbell:
     assert payload["status"] == "APPLIED"
     assert payload["action_taken"] == "APPLY"
     assert payload["apply_rc"] == 0
+
+
+def test_handoff_rolls_back_when_matched_count_regresses(tmp_path: Path, monkeypatch) -> None:
+    plan_path = tmp_path / "logs" / "automation" / "nav_rebalance_plan_latest.json"
+    config_path = tmp_path / "config" / "barbell.yml"
+    output_path = tmp_path / "logs" / "automation" / "nav_allocation_latest.json"
+    status_path = tmp_path / "logs" / "automation" / "nav_rebalance_handoff_latest.json"
+    staged_config_path = tmp_path / "config" / "barbell.staged.yml"
+    canonical_snapshot_path = tmp_path / "logs" / "canonical_snapshot_latest.json"
+
+    _write_json(
+        plan_path,
+        {
+            "rollout": {
+                "mode": "live",
+                "live_apply_allowed": True,
+                "gate_lift_candidate": True,
+                "gate_lift_ready": True,
+                "live_apply_blockers": [],
+            },
+            "summary": {"healthy": ["NVDA"], "weak": ["AAPL", "GS"]},
+        },
+    )
+    _write_yaml(
+        config_path,
+        """
+barbell:
+  safe_bucket:
+    symbols: ["CASH"]
+  core_bucket:
+    symbols: ["AAPL"]
+  speculative_bucket:
+    symbols: ["NVDA"]
+""".strip(),
+    )
+    _write_json(
+        canonical_snapshot_path,
+        {
+            "thin_linkage": {"matched_current": 10},
+            "gate": {"matched": 10},
+        },
+    )
+
+    def _fake_run(cmd, capture_output, text):
+        assert cmd[0] == str(sys.executable)
+        if cmd[1].endswith("scripts\\apply_nav_reallocation.py") or cmd[1].endswith("scripts/apply_nav_reallocation.py"):
+            if "--revert" in cmd:
+                return subprocess.CompletedProcess(cmd, 0, stdout="rollback ok\n", stderr="")
+            return subprocess.CompletedProcess(cmd, 0, stdout="apply ok\n", stderr="")
+        if cmd[1].endswith("scripts\\emit_canonical_snapshot.py") or cmd[1].endswith("scripts/emit_canonical_snapshot.py"):
+            _write_json(
+                canonical_snapshot_path,
+                {
+                    "thin_linkage": {"matched_current": 9},
+                    "gate": {"matched": 9},
+                },
+            )
+            return subprocess.CompletedProcess(cmd, 0, stdout="emit ok\n", stderr="")
+        raise AssertionError(f"Unexpected subprocess call: {cmd}")
+
+    monkeypatch.setattr(mod.subprocess, "run", _fake_run)
+
+    result = mod.run_nav_rebalance_handoff(
+        plan_path=plan_path,
+        config_path=config_path,
+        output_path=output_path,
+        staged_config_path=staged_config_path,
+        status_path=status_path,
+        canonical_snapshot_path=canonical_snapshot_path,
+    )
+
+    assert result["status"] == "ROLLED_BACK"
+    assert result["action_taken"] == "ROLLBACK"
+    assert result["reverted"] is True
+    assert result["matched_current_delta"] == -1
+    assert result["revert_reason"] == "matched_current_regressed"
+
+    payload = json.loads(status_path.read_text(encoding="utf-8"))
+    assert payload["status"] == "ROLLED_BACK"
+    assert payload["action_taken"] == "ROLLBACK"
+    assert payload["reverted"] is True
+    assert payload["revert_reason"] == "matched_current_regressed"
 
 
 def test_direct_cli_invocation_does_not_raise_module_not_found_error() -> None:

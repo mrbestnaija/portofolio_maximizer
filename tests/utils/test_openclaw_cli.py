@@ -183,6 +183,7 @@ def test_send_message_storm_guard_suppresses_repeated_retryable_failures(
             "OPENCLAW_PERSISTENT_GUARD_STATE_PATH": str(state_path),
             "OPENCLAW_PERSISTENT_DEDUP_WINDOW_SECONDS": "0",
             "OPENCLAW_TARGET_COOLDOWN_SECONDS": "0",
+            "OPENCLAW_LISTENER_FALLBACK_TO": "",
             "OPENCLAW_STORM_GUARD_ENABLED": "1",
             "OPENCLAW_STORM_BASE_COOLDOWN_SECONDS": "120",
             "OPENCLAW_STORM_MAX_COOLDOWN_SECONDS": "120",
@@ -240,6 +241,7 @@ def test_send_message_storm_guard_allows_send_after_cooldown_expires(
                 "OPENCLAW_PERSISTENT_GUARD_STATE_PATH": str(state_path),
                 "OPENCLAW_PERSISTENT_DEDUP_WINDOW_SECONDS": "0",
                 "OPENCLAW_TARGET_COOLDOWN_SECONDS": "0",
+                "OPENCLAW_LISTENER_FALLBACK_TO": "",
                 "OPENCLAW_STORM_GUARD_ENABLED": "1",
                 "OPENCLAW_STORM_BASE_COOLDOWN_SECONDS": "2",
                 "OPENCLAW_STORM_MAX_COOLDOWN_SECONDS": "2",
@@ -823,7 +825,14 @@ class TestErrorClassification:
         mock_run.side_effect = [send_fail, status_not_ready, restart_ok, status_ready, send_ok]
 
         with patch.dict("utils.openclaw_cli._listener_recovery_state", {"last_restart_monotonic": 0.0}, clear=True):
-            with patch.dict("utils.openclaw_cli.os.environ", {"OPENCLAW_AUTO_RECOVER_LISTENER": "1"}, clear=False):
+            with patch.dict(
+                "utils.openclaw_cli.os.environ",
+                {
+                    "OPENCLAW_AUTO_RECOVER_LISTENER": "1",
+                    "OPENCLAW_LISTENER_FALLBACK_TO": "telegram:6515478488",
+                },
+                clear=False,
+            ):
                 result = send_message(
                     to="+15551234567",
                     message="hello",
@@ -860,10 +869,18 @@ class TestErrorClassification:
                 "If the gateway is supervised, stop it with: openclaw gateway stop"
             ),
         )
-        mock_run.side_effect = [send_fail, status_not_ready, restart_conflict]
+        fallback_ok = MagicMock(returncode=0, stdout='{"ok":true}', stderr="")
+        mock_run.side_effect = [send_fail, status_not_ready, restart_conflict, fallback_ok]
 
         with patch.dict("utils.openclaw_cli._listener_recovery_state", {"last_restart_monotonic": 0.0}, clear=True):
-            with patch.dict("utils.openclaw_cli.os.environ", {"OPENCLAW_AUTO_RECOVER_LISTENER": "1"}, clear=False):
+            with patch.dict(
+                "utils.openclaw_cli.os.environ",
+                {
+                    "OPENCLAW_AUTO_RECOVER_LISTENER": "1",
+                    "OPENCLAW_LISTENER_FALLBACK_TO": "telegram:6515478488",
+                },
+                clear=False,
+            ):
                 result = send_message(
                     to="+15551234567",
                     message="hello",
@@ -874,11 +891,12 @@ class TestErrorClassification:
                     skip_rate_limit=True,
                 )
 
-        assert result.ok is False
+        assert result.ok is True
         assert "gateway_already_running_conflict" in result.stderr
         assert "already owned by a supervised OpenClaw process" in result.stderr
         assert "relink with" not in result.stderr.lower()
-        assert mock_run.call_count == 3
+        assert "fallback channel telegram" in result.stderr.lower()
+        assert mock_run.call_count == 4
 
     @patch("utils.openclaw_cli.time.sleep", return_value=None)
     @patch("utils.openclaw_cli.subprocess.run")
@@ -891,10 +909,18 @@ class TestErrorClassification:
             stdout="",
             stderr="WebSocket Error (getaddrinfo ENOTFOUND web.whatsapp.com)",
         )
-        mock_run.side_effect = [send_fail, status_fail]
+        fallback_ok = MagicMock(returncode=0, stdout='{"ok":true}', stderr="")
+        mock_run.side_effect = [send_fail, status_fail, fallback_ok]
 
         with patch.dict("utils.openclaw_cli._listener_recovery_state", {"last_restart_monotonic": 0.0}, clear=True):
-            with patch.dict("utils.openclaw_cli.os.environ", {"OPENCLAW_AUTO_RECOVER_LISTENER": "1"}, clear=False):
+            with patch.dict(
+                "utils.openclaw_cli.os.environ",
+                {
+                    "OPENCLAW_AUTO_RECOVER_LISTENER": "1",
+                    "OPENCLAW_LISTENER_FALLBACK_TO": "telegram:6515478488",
+                },
+                clear=False,
+            ):
                 result = send_message(
                     to="+15551234567",
                     message="hello",
@@ -905,8 +931,9 @@ class TestErrorClassification:
                     skip_rate_limit=True,
                 )
 
-        assert result.ok is False
+        assert result.ok is True
         assert "DNS lookup to web.whatsapp.com failed" in result.stderr
+        assert "fallback channel telegram" in result.stderr.lower()
 
     @patch("utils.openclaw_cli.time.sleep", return_value=None)
     @patch("utils.openclaw_cli.time.monotonic", return_value=1000.0)
@@ -923,7 +950,8 @@ class TestErrorClassification:
             ),
             stderr="",
         )
-        mock_run.side_effect = [send_fail, status_not_ready]
+        fallback_ok = MagicMock(returncode=0, stdout='{"ok":true}', stderr="")
+        mock_run.side_effect = [send_fail, status_not_ready, fallback_ok]
 
         with patch.dict("utils.openclaw_cli._listener_recovery_state", {"last_restart_monotonic": 999.0}, clear=True):
             with patch.dict(
@@ -931,6 +959,7 @@ class TestErrorClassification:
                 {
                     "OPENCLAW_AUTO_RECOVER_LISTENER": "1",
                     "OPENCLAW_LISTENER_RECOVERY_COOLDOWN_SECONDS": "600",
+                    "OPENCLAW_LISTENER_FALLBACK_TO": "telegram:6515478488",
                 },
                 clear=False,
             ):
@@ -944,10 +973,82 @@ class TestErrorClassification:
                     skip_rate_limit=True,
                 )
 
-        assert result.ok is False
+        assert result.ok is True
         assert "cooldown" in result.stderr.lower()
+        assert "fallback channel telegram" in result.stderr.lower()
         calls = [" ".join(str(x) for x in (call.args[0] if call.args else [])) for call in mock_run.call_args_list]
         assert not any("gateway restart" in cmd for cmd in calls)
+        assert mock_run.call_count == 3
+
+    @patch("utils.openclaw_cli.subprocess.run")
+    def test_send_message_missing_listener_falls_back_to_telegram(
+        self, mock_run: MagicMock
+    ) -> None:
+        send_fail = MagicMock(
+            returncode=1,
+            stdout="",
+            stderr="No active WhatsApp Web listener (account: default).",
+        )
+        fallback_ok = MagicMock(returncode=0, stdout='{"ok":true}', stderr="")
+        mock_run.side_effect = [send_fail, fallback_ok]
+
+        with patch.dict(
+            "utils.openclaw_cli.os.environ",
+            {
+                "OPENCLAW_AUTO_RECOVER_LISTENER": "0",
+                "OPENCLAW_LISTENER_FALLBACK_CHANNEL": "telegram",
+                "OPENCLAW_LISTENER_FALLBACK_TO": "telegram:6515478488",
+            },
+            clear=False,
+        ):
+            result = send_message(
+                to="+15551234567",
+                message="hello",
+                command="openclaw",
+                timeout_seconds=5.0,
+                max_retries=0,
+                channel="whatsapp",
+                skip_dedup=True,
+                skip_rate_limit=True,
+            )
+
+        assert result.ok is True
+        assert "telegram" in " ".join(result.command).lower()
+        assert "fallback channel telegram" in result.stderr.lower()
+        assert mock_run.call_count == 2
+
+    @patch("utils.openclaw_cli.subprocess.run")
+    def test_send_message_gateway_timeout_falls_back_to_telegram(
+        self, mock_run: MagicMock
+    ) -> None:
+        send_fail = MagicMock(returncode=124, stdout="", stderr="gateway timeout after 10000ms")
+        fallback_ok = MagicMock(returncode=0, stdout='{"ok":true}', stderr="")
+        mock_run.side_effect = [send_fail, fallback_ok]
+
+        with patch.dict(
+            "utils.openclaw_cli.os.environ",
+            {
+                "OPENCLAW_AUTO_RECOVER_LISTENER": "0",
+                "OPENCLAW_LISTENER_FALLBACK_CHANNEL": "telegram",
+                "OPENCLAW_LISTENER_FALLBACK_TO": "telegram:6515478488",
+            },
+            clear=False,
+        ):
+            result = send_message(
+                to="+15551234567",
+                message="hello",
+                command="openclaw",
+                timeout_seconds=5.0,
+                max_retries=0,
+                channel="whatsapp",
+                skip_dedup=True,
+                skip_rate_limit=True,
+            )
+
+        assert result.ok is True
+        assert "telegram" in " ".join(result.command).lower()
+        assert "fallback channel telegram" in result.stderr.lower()
+        assert mock_run.call_count == 2
 
     @patch("utils.openclaw_cli.time.sleep", return_value=None)
     @patch("utils.openclaw_cli.send_message")

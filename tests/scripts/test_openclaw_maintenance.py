@@ -755,6 +755,30 @@ def test_watch_mode_survives_cycle_exception(monkeypatch, tmp_path) -> None:
     assert any(str(x).startswith("watch_cycle_exception:RuntimeError:simulated_cleanup_failure") for x in warnings)
 
 
+def test_remember_channels_snapshot_stores_last_good_channels_state() -> None:
+    state: dict[str, object] = {}
+    payload = {
+        "ts": 123456789,
+        "channels": {
+            "whatsapp": {
+                "configured": True,
+                "linked": True,
+                "running": True,
+                "connected": True,
+            }
+        },
+    }
+
+    om._remember_channels_snapshot(state, payload, source="probe")
+
+    snapshot = state.get("last_channels_status_snapshot")
+    assert isinstance(snapshot, dict)
+    assert snapshot["timestamp_ms"] == 123456789
+    assert snapshot["channels"]["whatsapp"]["connected"] is True
+    assert state["last_channels_status_snapshot_source"] == "probe"
+    assert "last_channels_status_snapshot_at_utc" in state
+
+
 def test_fast_supervisor_tick_triggers_restart_at_threshold(monkeypatch) -> None:
     probe_calls = {"count": 0}
     run_calls: list[list[str]] = []

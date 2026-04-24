@@ -57,6 +57,25 @@ This document is intentionally “policy-like”: it tells you what must be true
   lots (AMZN×6, GOOG×5, NVDA×6, AAPL×1) each contribute +1 when closed via stop/target.
   This is a ceiling, not a guarantee; code cannot force closes.
 
+## Delta (2026-04-19 v4 readiness)
+
+- Canonical snapshot contract bumped to `schema_version=4` with `alpha_objective`,
+  schedule-aware freshness, warmup bridge/expiry distinction, and a static canonical
+  source registry at `config/canonical_source_registry.yml`.
+- Readiness consumers now fail closed on malformed canonical snapshots and surface
+  `objective_valid`, `trajectory_alarm`, and freshness diagnostics in their reports.
+- `pandas_market_calendars` is now a required dependency for NYSE schedule-aware freshness
+  checks; non-UI code paths no longer fall back to `visualizations/performance/metrics_summary.json`.
+
+## Delta (2026-04-20)
+
+- TAKE_PROFIT-first policy added: `Documentation/TAKE_PROFIT_FIRST_POLICY.md`.
+- Binding economic objective: the system now optimizes for `exit_reason == TAKE_PROFIT`
+  as the primary signal objective, with payoff asymmetry and omega ratio ahead of
+  win rate and directional accuracy.
+- Policy constants are centralized in `etl/domain_objective.py` so selection scripts,
+  eligibility gates, and forecast-audit tooling import the same repo-wide values.
+
 ## Delta (2026-04-18)
 
 - Evidence-first alpha pipeline added: `Documentation/EVIDENCE_FIRST_ALPHA_PIPELINE_2026-04-18.md`.
@@ -83,6 +102,7 @@ The project contains many documents; the following are the **core** ones that sh
 - **Quant gating policy (GREEN/YELLOW/RED)**: `Documentation/QUANT_VALIDATION_MONITORING_POLICY.md`
 - **Numeric invariants (guard rails)**: `Documentation/NUMERIC_INVARIANTS_AND_SCALING_TESTS.md`
 - **Metrics + evaluation definitions (math)**: `Documentation/METRICS_AND_EVALUATION.md`
+- **TAKE_PROFIT-first policy**: `Documentation/TAKE_PROFIT_FIRST_POLICY.md`
 - **Evidence-first alpha pipeline**: `Documentation/EVIDENCE_FIRST_ALPHA_PIPELINE_2026-04-18.md` (preprocess validation, evidence-health contracts, provenance, dashboard wiring, robust testing).
 - **Weak-ticker rotation + NAV rebalance plan**: `Documentation/WEAK_TICKER_ROTATION_AND_NAV_REBALANCE_PLAN_2026-04-18.md` (automated demotion/promotion of weak vs strong tickers under evidence-first governance).
 - **Weak-ticker NAV sidecar artifact**: `logs/automation/nav_rebalance_plan_latest.json` (shadow-first output from `scripts/build_nav_rebalance_plan.py`), plus `logs/automation/nav_rebalance_handoff_latest.json` (auto-apply handoff status from `scripts/run_nav_rebalance_handoff.py`).
@@ -94,8 +114,9 @@ If something is unclear or conflicting, treat this as the priority order for res
 1. Code + tests (ground truth)
 2. `Documentation/REPO_WIDE_MATRIX_FIRST_REMEDIATION_2026-04-08.md` (objective semantics and repo-wide policy)
 3. `Documentation/PROJECT_STATUS.md` (current intent)
-4. `Documentation/METRICS_AND_EVALUATION.md` (definitions)
-4. Other docs (supporting context)
+4. `Documentation/TAKE_PROFIT_FIRST_POLICY.md` (signal objective and metric hierarchy)
+5. `Documentation/METRICS_AND_EVALUATION.md` (definitions)
+6. Other docs (supporting context)
 
 **Remote-first hygiene**
 - Always rebase or pull before branching; push small commits early to avoid dashboard/forecaster conflicts.

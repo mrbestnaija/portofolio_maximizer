@@ -181,6 +181,38 @@ def test_execute_signal_preserves_ts_signal_id_from_legacy_string_signal_id():
     db.close()
 
 
+def test_execute_signal_marks_trade_synthetic_when_data_source_is_synthetic_even_if_execution_mode_is_live():
+    db = DatabaseManager(":memory:")
+    validator = DummyValidator(DummyValidationResult(True, "EXECUTE", 0.9))
+    engine = PaperTradingEngine(
+        initial_capital=10_000.0,
+        slippage_pct=0.0,
+        transaction_cost_pct=0.0,
+        database_manager=db,
+        signal_validator=validator,
+    )
+
+    signal = {
+        "ticker": "AAPL",
+        "action": "BUY",
+        "confidence": 0.82,
+        "data_source": "synthetic",
+        "execution_mode": "live",
+    }
+    result = engine.execute_signal(signal, make_market_data(120.0))
+
+    assert result.status == "EXECUTED"
+    assert result.trade is not None
+    assert result.trade.is_synthetic == 1
+
+    row = db.cursor.execute(
+        "SELECT is_synthetic FROM trade_executions ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert int(row["is_synthetic"]) == 1
+
+    db.close()
+
+
 def test_execute_signal_uses_last_valid_market_row_when_terminal_close_is_nan():
     db = DatabaseManager(":memory:")
     validator = DummyValidator(DummyValidationResult(True, "EXECUTE", 0.9))

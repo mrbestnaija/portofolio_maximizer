@@ -28,6 +28,13 @@
 - This is a structural evidence-persistence fix, not a threshold or gate change.
 - Verified regression lanes: targeted lineage suite `52 passed`; repo fast lane `2681 selected` with no failures.
 
+## Delta (2026-04-22, rolling sleeve governance)
+
+- Ticker eligibility, sleeve summarization, and NAV promotion now use rolling evidence windows over `production_closed_trades`, so weak names can be re-admitted when fresh closed-trade evidence recovers instead of being permanently culled by one short sample.
+- `evaluate_sleeve_promotions.py` now emits explicit `PROMOTE` / `DEMOTE` / `HOLD` actions, which keeps the warmup-bridge state visible without letting it masquerade as a genuine pass.
+- NAV rebalance planning now carries the eligibility and sleeve windows forward as evidence-contract metadata, so downstream allocation artifacts can distinguish rolling proof from lifetime history.
+- Verified regression lanes for the rolling-window sweep: targeted sleeve/eligibility tests passed and the repo fast lane remained green.
+
 ## Phase 7.32 — Adversarial Hardening Round 2 (2026-03-02)
 
 **Regression baseline**: 1489 passed, 1 skipped, 7 xfailed (`pytest -m "not gpu and not slow"`)

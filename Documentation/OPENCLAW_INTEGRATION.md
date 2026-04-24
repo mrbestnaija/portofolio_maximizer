@@ -221,6 +221,12 @@ Practical prompt pattern:
 
 When thresholds are exceeded, the error monitor will save a file alert under `logs/alerts/` and also deliver a truncated summary via OpenClaw (if configured).
 
+The daily 8:30 AM Ticker Health Monitor also reads `logs/automation/tp_contingency_latest.json`,
+which is produced by `scripts/outcome_linkage_attribution_report.py` after the canonical
+snapshot step. It alerts when the highest-SNR posterior TAKE_PROFIT mean stays below the
+overall posterior TAKE_PROFIT mean for two consecutive regenerations, because that is the
+earliest signal that the TAKE_PROFIT edge is degrading even if headline PnL still looks stable.
+
 ### Production Audit Gate Alerts
 
 `scripts/production_audit_gate.py` can send its PASS/FAIL summary via OpenClaw.
@@ -702,7 +708,7 @@ Jobs are stored in `~/.openclaw/cron/jobs.json` (not in the repo). Each job uses
 | Production Gate Check | P0 | `0 7 * * *` (daily 7 AM) | `run_production_audit_gate` tool (preferred) / `python scripts/production_audit_gate.py` fallback |
 | Quant Validation Health | P0 | `30 7 * * *` (daily 7:30 AM) | Inline Python analyzing `logs/signals/quant_validation.jsonl` |
 | Signal Linkage Monitor | P1 | `0 8 * * *` (daily 8 AM) | Inline Python querying DB for NULL signal_id, orphans |
-| Ticker Health Monitor | P1 | `30 8 * * *` (daily 8:30 AM) | Inline Python checking per-ticker PnL and consecutive losses |
+| Ticker Health Monitor | P1 | `30 8 * * *` (daily 8:30 AM) | Inline Python checking per-ticker PnL, consecutive losses, and `logs/automation/tp_contingency_latest.json` TAKE_PROFIT calibration drift |
 | GARCH Unit-Root Guard | P2 | `0 9 * * 1` (Mon 9 AM) | Inline Python scanning forecast audits for alpha+beta >= 0.98 |
 | Overnight Hold Monitor | P2 | `0 9 * * 5` (Fri 9 AM) | Inline Python comparing intraday vs overnight PnL |
 | Model Training Autopilot | P1 | `15 */6 * * *` (every 6h) | `python scripts/openclaw_training_autopilot.py --benchmark-factor 0.989` (detaches `run_training_priority_cycle.py` when below benchmarks) |

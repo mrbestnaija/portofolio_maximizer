@@ -3023,11 +3023,6 @@ def main() -> None:
                     entry["outcome_reason"] = "AMBIGUOUS_MATCH"
                     outcome_windows_invalid_context += 1
                     outcome_windows_ambiguous += 1
-        else:
-            for entry in dataset_entries:
-                entry["outcome_status"] = "OUTCOMES_NOT_LOADED"
-                entry["outcome_reason"] = "OUTCOME_JOIN_UNAVAILABLE"
-                outcome_windows_outcomes_not_loaded += 1
 
     generated_utc = telemetry_now_utc()
 

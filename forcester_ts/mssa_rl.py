@@ -13,7 +13,7 @@ import logging
 import importlib.util
 import os
 import sys
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -25,6 +25,11 @@ from pandas.tseries.frequencies import to_offset
 
 from ._freq_compat import normalize_freq
 from .metrics import compute_regression_metrics
+
+try:  # Python 3.11+
+    from datetime import UTC
+except ImportError:  # Python 3.10 fallback
+    UTC = timezone.utc
 
 cp = None
 _CUPY_AVAILABLE = False

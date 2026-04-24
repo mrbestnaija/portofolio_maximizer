@@ -37,6 +37,8 @@ DEFAULT_AUDIT_DIR = ROOT / "logs" / "forecast_audits"
 DEFAULT_OUT_DIR = ROOT / "visualizations" / "performance"
 DEFAULT_ELIGIBILITY = ROOT / "logs" / "ticker_eligibility.json"
 DEFAULT_CONTEXT_QUALITY = ROOT / "logs" / "context_quality_latest.json"
+DEFAULT_CANONICAL_SNAPSHOT = ROOT / "logs" / "canonical_snapshot_latest.json"
+DEFAULT_CAPITAL_UTILIZATION = ROOT / "logs" / "capital_utilization_latest.json"
 DEFAULT_METRICS_PATH = DEFAULT_OUT_DIR / "metrics_summary.json"
 
 R3_WIN_RATE = R3_MIN_WIN_RATE
@@ -202,6 +204,7 @@ def _build_metrics_summary(
     eligibility: dict[str, Any],
     context: dict[str, Any],
     sufficiency: dict[str, Any],
+    production_tracking: dict[str, Any],
     warnings: list[str],
     chart_paths: dict[str, str],
     db_path: Path,
@@ -247,6 +250,7 @@ def _build_metrics_summary(
         "context_summary": context_summary,
         "sufficiency_status": sufficiency.get("status"),
         "sufficiency": sufficiency,
+        "production_tracking": production_tracking,
         "per_ticker": per_ticker,
         "chart_paths": chart_paths,
         "warnings": sorted(set(warnings)),
@@ -457,6 +461,371 @@ def chart_context_quality_heatmap(context: dict[str, Any], out_path: Path) -> No
     plt.close()
 
 
+def _combined_production_tracking(
+    canonical_snapshot: dict[str, Any],
+    capital_utilization: dict[str, Any],
+    *,
+    canonical_snapshot_path: Path = DEFAULT_CANONICAL_SNAPSHOT,
+    capital_utilization_path: Path = DEFAULT_CAPITAL_UTILIZATION,
+) -> dict[str, Any]:
+    snapshot = canonical_snapshot if isinstance(canonical_snapshot, dict) else {}
+    utilization = capital_utilization if isinstance(capital_utilization, dict) else {}
+    summary = snapshot.get("summary") if isinstance(snapshot.get("summary"), dict) else {}
+    thin_linkage = snapshot.get("thin_linkage") if isinstance(snapshot.get("thin_linkage"), dict) else {}
+    alpha_objective = snapshot.get("alpha_objective") if isinstance(snapshot.get("alpha_objective"), dict) else {}
+    util = utilization or (snapshot.get("utilization") if isinstance(snapshot.get("utilization"), dict) else {})
+
+    ngn_hurdle_pct = _finite_float(summary.get("ngn_hurdle_pct"), 28.0)
+    roi_ann_pct = _finite_float(
+        util.get("roi_ann_pct"),
+        _finite_float(summary.get("roi_ann_pct"), _finite_float(alpha_objective.get("roi_ann_pct"), 0.0)),
+    )
+    deployment_pct = _finite_float(
+        util.get("deployment_pct"),
+        _finite_float(summary.get("deployment_pct"), _finite_float(alpha_objective.get("deployment_pct"), 0.0)),
+    )
+    trades_per_day = _finite_float(util.get("trades_per_day"), 0.0)
+    beats_hurdle = None
+    if math.isfinite(roi_ann_pct) and math.isfinite(ngn_hurdle_pct):
+        beats_hurdle = roi_ann_pct >= ngn_hurdle_pct
+
+    matched_current = int(thin_linkage.get("matched_current") or 0)
+    matched_threshold = int(thin_linkage.get("matched_threshold") or 10)
+    matched_needed = int(thin_linkage.get("matched_needed") or max(0, matched_threshold - matched_current))
+    open_lots_total = int(thin_linkage.get("open_lots_total") or 0)
+    open_lots_with_audit_coverage = int(thin_linkage.get("open_lots_with_audit_coverage") or 0)
+    open_lots_legacy_no_coverage = int(thin_linkage.get("open_lots_legacy_no_coverage") or 0)
+    open_lots_other_no_coverage = int(thin_linkage.get("open_lots_other_no_coverage") or 0)
+    covered_lots_by_ticker = (
+        thin_linkage.get("covered_lots_by_ticker")
+        if isinstance(thin_linkage.get("covered_lots_by_ticker"), dict)
+        else {}
+    )
+    sorted_covered = dict(
+        sorted(
+            ((str(ticker).upper(), int(_finite_float(count))) for ticker, count in covered_lots_by_ticker.items()),
+            key=lambda kv: (-kv[1], kv[0]),
+        )
+    )
+
+    return {
+        "source_paths": {
+            "canonical_snapshot": str(canonical_snapshot_path),
+            "capital_utilization": str(capital_utilization_path),
+        },
+        "ngn_hurdle": {
+            "roi_ann_pct": roi_ann_pct,
+            "deployment_pct": deployment_pct,
+            "trades_per_day": trades_per_day,
+            "capital": _finite_float(util.get("capital")),
+            "total_days": int(util.get("total_days") or 0),
+            "ngn_hurdle_pct": ngn_hurdle_pct,
+            "gap_to_hurdle_pp": _finite_float(summary.get("gap_to_hurdle_pp"), ngn_hurdle_pct - roi_ann_pct),
+            "beats_hurdle": beats_hurdle,
+            "avg_hold_days": _finite_float(util.get("avg_hold_days")),
+            "avg_notional_overstatement_factor": _finite_float(util.get("avg_notional_overstatement_factor")),
+            "scenarios": util.get("scenarios") if isinstance(util.get("scenarios"), dict) else {},
+        },
+        "thin_linkage": {
+            "matched_current": matched_current,
+            "matched_threshold": matched_threshold,
+            "matched_needed": matched_needed,
+            "status": str(thin_linkage.get("status") or "unknown"),
+            "query_error": thin_linkage.get("query_error"),
+            "audit_hygiene": thin_linkage.get("audit_hygiene") if isinstance(thin_linkage.get("audit_hygiene"), dict) else {},
+            "open_lots_total": open_lots_total,
+            "open_lots_with_audit_coverage": open_lots_with_audit_coverage,
+            "open_lots_legacy_no_coverage": open_lots_legacy_no_coverage,
+            "open_lots_other_no_coverage": open_lots_other_no_coverage,
+            "covered_lots_by_ticker": sorted_covered,
+            "pipeline_defects": thin_linkage.get("pipeline_defects") if isinstance(thin_linkage.get("pipeline_defects"), dict) else {},
+            "trajectory_alarm": thin_linkage.get("trajectory_alarm") if isinstance(thin_linkage.get("trajectory_alarm"), dict) else {},
+            "coverage_ratio_alarm": thin_linkage.get("coverage_ratio_alarm") if isinstance(thin_linkage.get("coverage_ratio_alarm"), dict) else {},
+            "post_deadline_time_to_10_estimate": thin_linkage.get("post_deadline_time_to_10_estimate") if isinstance(thin_linkage.get("post_deadline_time_to_10_estimate"), dict) else {},
+        },
+    }
+
+
+def _axis_bounds(values: list[float], *, floor: float | None = None, minimum_span: float = 5.0) -> tuple[float, float]:
+    finite_values: list[float] = []
+    for value in values:
+        try:
+            parsed = float(value)
+        except Exception:
+            continue
+        if math.isfinite(parsed):
+            finite_values.append(parsed)
+    if floor is not None:
+        try:
+            parsed_floor = float(floor)
+        except Exception:
+            parsed_floor = None
+        if parsed_floor is not None and math.isfinite(parsed_floor):
+            finite_values.append(parsed_floor)
+    if not finite_values:
+        return 0.0, 1.0
+    lower = min(finite_values)
+    upper = max(finite_values)
+    span = max(upper - lower, minimum_span)
+    pad = max(1.0, span * 0.12)
+    return lower - pad, upper + pad
+
+
+def chart_ngn_hurdle_progress(tracking: dict[str, Any], out_path: Path) -> None:
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        log.warning("matplotlib not available; skipping NGN hurdle chart")
+        return
+    ngn = tracking.get("ngn_hurdle", {}) if isinstance(tracking, dict) else {}
+    if not isinstance(ngn, dict) or not ngn:
+        return
+
+    scenarios = ngn.get("scenarios") if isinstance(ngn.get("scenarios"), dict) else {}
+    ordered = [
+        ("current", "Current"),
+        ("partial_unblock_0_95", "0.95/day unblock"),
+        ("target_1_40", "1.40/day target"),
+    ]
+    labels: list[str] = []
+    roi_values: list[float] = []
+    throughput_values: list[float] = []
+    for key, label in ordered:
+        scenario = scenarios.get(key, {}) if isinstance(scenarios, dict) else {}
+        labels.append(label)
+        roi_values.append(
+            _finite_float(
+                scenario.get("roi_ann_pct"),
+                _finite_float(ngn.get("roi_ann_pct")),
+            )
+        )
+        throughput_values.append(
+            _finite_float(
+                scenario.get("trades_per_day"),
+                _finite_float(ngn.get("trades_per_day")),
+            )
+        )
+
+    hurdle_pct = _finite_float(ngn.get("ngn_hurdle_pct"), 28.0)
+    current_roi = _finite_float(ngn.get("roi_ann_pct"))
+    current_deployment = _finite_float(ngn.get("deployment_pct"))
+    current_gap = _finite_float(ngn.get("gap_to_hurdle_pp"), hurdle_pct - current_roi)
+    capital = _finite_float(ngn.get("capital"))
+    total_days = int(ngn.get("total_days") or 0)
+    avg_hold_days = _finite_float(ngn.get("avg_hold_days"))
+    overstatement = _finite_float(ngn.get("avg_notional_overstatement_factor"))
+    beats_hurdle = ngn.get("beats_hurdle")
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5.5))
+    colors = ["#30c48d" if value >= hurdle_pct else "#f6a621" if value >= hurdle_pct * 0.8 else "#f05252" for value in roi_values]
+    bars = ax1.bar(labels, roi_values, color=colors, edgecolor="black", linewidth=0.7, width=0.55)
+    ax1.axhline(hurdle_pct, color="#f6a621", linewidth=2, linestyle="--", label="NGN hurdle")
+    ymin, ymax = _axis_bounds(roi_values, floor=hurdle_pct)
+    ax1.set_ylim(ymin, ymax)
+    ax1.set_ylabel("Annualized ROI (%)")
+    ax1.set_title("NGN hurdle vs live utilization")
+    ax1.legend(loc="upper left", frameon=False)
+    for bar in bars:
+        height = bar.get_height()
+        ax1.text(
+            bar.get_x() + bar.get_width() / 2,
+            height + (ymax - ymin) * 0.025,
+            f"{height:.1f}%",
+            ha="center",
+            va="bottom",
+            fontsize=9,
+        )
+    ax1.text(
+        0.02,
+        0.02,
+        (
+            f"current gap={current_gap:.2f}pp\n"
+            f"deployment={current_deployment:.2f}%\n"
+            f"beats hurdle={beats_hurdle if beats_hurdle is not None else 'n/a'}"
+        ),
+        transform=ax1.transAxes,
+        fontsize=9,
+        va="bottom",
+        ha="left",
+        bbox=dict(boxstyle="round,pad=0.35", facecolor="#0d1620", edgecolor="#2a3642", alpha=0.96),
+    )
+
+    bars2 = ax2.bar(labels, throughput_values, color="#1565c0", edgecolor="black", linewidth=0.7, width=0.55)
+    ax2.set_ylabel("Trades / day")
+    ax2.set_title("Live trade throughput scenarios")
+    ymin2, ymax2 = _axis_bounds(throughput_values, floor=0.0)
+    ax2.set_ylim(ymin2, ymax2)
+    for bar in bars2:
+        height = bar.get_height()
+        ax2.text(
+            bar.get_x() + bar.get_width() / 2,
+            height + (ymax2 - ymin2) * 0.025,
+            f"{height:.2f}",
+            ha="center",
+            va="bottom",
+            fontsize=9,
+        )
+    ax2.text(
+        0.02,
+        0.02,
+        (
+            f"capital=${capital:,.0f}\n"
+            f"days={total_days}\n"
+            f"avg hold={avg_hold_days:.2f}d\n"
+            f"notional x{overstatement:.2f}"
+        ),
+        transform=ax2.transAxes,
+        fontsize=9,
+        va="bottom",
+        ha="left",
+        bbox=dict(boxstyle="round,pad=0.35", facecolor="#0d1620", edgecolor="#2a3642", alpha=0.96),
+    )
+    ax2.tick_params(axis="x", rotation=18)
+
+    plt.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(str(out_path), dpi=120, bbox_inches="tight")
+    plt.close()
+
+
+def chart_thin_linkage_progress(tracking: dict[str, Any], out_path: Path) -> None:
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        log.warning("matplotlib not available; skipping thin-linkage chart")
+        return
+    thin = tracking.get("thin_linkage", {}) if isinstance(tracking, dict) else {}
+    if not isinstance(thin, dict) or not thin:
+        return
+
+    matched_current = _finite_float(thin.get("matched_current"))
+    matched_threshold = max(1.0, _finite_float(thin.get("matched_threshold"), 10.0))
+    matched_needed = max(0.0, _finite_float(thin.get("matched_needed"), matched_threshold - matched_current))
+    open_total = _finite_float(thin.get("open_lots_total"))
+    covered = _finite_float(thin.get("open_lots_with_audit_coverage"))
+    legacy = _finite_float(thin.get("open_lots_legacy_no_coverage"))
+    other = _finite_float(thin.get("open_lots_other_no_coverage"))
+    status = str(thin.get("status") or "unknown").upper()
+    hygiene = thin.get("audit_hygiene") if isinstance(thin.get("audit_hygiene"), dict) else {}
+    coverage_alarm = thin.get("coverage_ratio_alarm") if isinstance(thin.get("coverage_ratio_alarm"), dict) else {}
+    trajectory_alarm = thin.get("trajectory_alarm") if isinstance(thin.get("trajectory_alarm"), dict) else {}
+    post_deadline = (
+        thin.get("post_deadline_time_to_10_estimate")
+        if isinstance(thin.get("post_deadline_time_to_10_estimate"), dict)
+        else {}
+    )
+    covered_by_ticker = thin.get("covered_lots_by_ticker") if isinstance(thin.get("covered_lots_by_ticker"), dict) else {}
+    top_tickers = sorted(covered_by_ticker.items(), key=lambda kv: (-_finite_float(kv[1]), kv[0]))
+    if len(top_tickers) > 8:
+        remainder = sum(_finite_float(count) for _, count in top_tickers[8:])
+        top_tickers = top_tickers[:8] + [("OTHER", remainder)]
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 8), gridspec_kw={"height_ratios": [1.2, 1.8]})
+
+    remaining = max(0.0, matched_threshold - matched_current)
+    ax1.barh([0], [matched_current], color="#30c48d", edgecolor="black", linewidth=0.7, label="matched")
+    ax1.barh([0], [remaining], left=[matched_current], color="#9e9e9e", alpha=0.35, edgecolor="black", linewidth=0.7, label="needed")
+    ax1.axvline(matched_threshold, color="#f6a621", linewidth=2, linestyle="--", label="threshold")
+    ax1.set_xlim(0, max(matched_threshold, matched_current + matched_needed) * 1.15 if matched_threshold else 1.0)
+    ax1.set_yticks([])
+    ax1.set_xlabel("Match count")
+    ax1.set_title("THIN_LINKAGE progress toward unattended-ready state")
+    ax1.legend(loc="upper right", frameon=False, ncol=3)
+    ax1.text(
+        0.02,
+        0.12,
+        (
+            f"{int(matched_current)}/{int(matched_threshold)} matched\n"
+            f"need {int(matched_needed)} more\n"
+            f"status={status}"
+        ),
+        transform=ax1.transAxes,
+        fontsize=9,
+        va="bottom",
+        ha="left",
+        bbox=dict(boxstyle="round,pad=0.35", facecolor="#0d1620", edgecolor="#2a3642", alpha=0.96),
+    )
+    if coverage_alarm:
+        ax1.text(
+            0.98,
+            0.12,
+            (
+                f"coverage={coverage_alarm.get('severity', 'n/a')}\n"
+                f"ratio={_finite_float(coverage_alarm.get('ratio')):.2f}\n"
+                f"deadline_days={_finite_float(trajectory_alarm.get('days_to_deadline')):.1f}"
+            ),
+            transform=ax1.transAxes,
+            fontsize=9,
+            va="bottom",
+            ha="right",
+            bbox=dict(boxstyle="round,pad=0.35", facecolor="#0d1620", edgecolor="#2a3642", alpha=0.96),
+        )
+    elif post_deadline:
+        ax1.text(
+            0.98,
+            0.12,
+            f"estimate={post_deadline.get('status', 'n/a')}",
+            transform=ax1.transAxes,
+            fontsize=9,
+            va="bottom",
+            ha="right",
+            bbox=dict(boxstyle="round,pad=0.35", facecolor="#0d1620", edgecolor="#2a3642", alpha=0.96),
+        )
+
+    if top_tickers:
+        tickers = [ticker for ticker, _ in top_tickers]
+        counts = [_finite_float(count) for _, count in top_tickers]
+        colors = ["#1565c0" if ticker != "OTHER" else "#7b8a9a" for ticker in tickers]
+        y_pos = list(range(len(tickers)))
+        bars = ax2.barh(y_pos, counts, color=colors, edgecolor="black", linewidth=0.6)
+        ax2.set_yticks(y_pos)
+        ax2.set_yticklabels(tickers)
+        ax2.invert_yaxis()
+        ax2.set_xlabel("Open lots with audit coverage")
+        ax2.set_title("Coverage distribution by ticker")
+        xmax = max(counts) if counts else 1.0
+        ax2.set_xlim(0, max(1.0, xmax * 1.25))
+        for bar, count in zip(bars, counts):
+            ax2.text(
+                bar.get_width() + max(0.1, xmax * 0.02),
+                bar.get_y() + bar.get_height() / 2,
+                f"{count:.0f}",
+                va="center",
+                ha="left",
+                fontsize=9,
+            )
+    else:
+        ax2.text(0.5, 0.5, "No coverage-by-ticker data", ha="center", va="center", transform=ax2.transAxes)
+        ax2.set_axis_off()
+
+    ax2.text(
+        0.99,
+        0.02,
+        (
+            f"open={int(open_total)}  covered={int(covered)}  "
+            f"legacy={int(legacy)}  other={int(other)}\n"
+            f"hygiene={str(hygiene.get('status') or 'unknown').upper()}  "
+            f"action_required={bool((thin.get('pipeline_defects') or {}).get('action_required', False))}"
+        ),
+        transform=ax2.transAxes,
+        fontsize=8.8,
+        va="bottom",
+        ha="right",
+        bbox=dict(boxstyle="round,pad=0.35", facecolor="#0d1620", edgecolor="#2a3642", alpha=0.96),
+    )
+
+    plt.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(str(out_path), dpi=120, bbox_inches="tight")
+    plt.close()
+
+
 def generate_performance_artifacts(
     *,
     db_path: Path = DEFAULT_DB,
@@ -464,6 +833,8 @@ def generate_performance_artifacts(
     out_dir: Path = DEFAULT_OUT_DIR,
     eligibility_path: Path = DEFAULT_ELIGIBILITY,
     context_quality_path: Path = DEFAULT_CONTEXT_QUALITY,
+    canonical_snapshot_path: Path = DEFAULT_CANONICAL_SNAPSHOT,
+    capital_utilization_path: Path = DEFAULT_CAPITAL_UTILIZATION,
     json_metrics_path: Path = DEFAULT_METRICS_PATH,
     sufficiency: dict[str, Any] | None = None,
     strict_mode: bool = True,
@@ -477,6 +848,14 @@ def generate_performance_artifacts(
     l1_metrics = _load_lift_metrics(audit_dir)
     eligibility = _load_json(eligibility_path, "eligibility", warnings)
     context = _load_json(context_quality_path, "context_quality", warnings)
+    canonical_snapshot = _load_json(canonical_snapshot_path, "canonical_snapshot", warnings)
+    capital_utilization = _load_json(capital_utilization_path, "capital_utilization", warnings)
+    production_tracking = _combined_production_tracking(
+        canonical_snapshot,
+        capital_utilization,
+        canonical_snapshot_path=canonical_snapshot_path,
+        capital_utilization_path=capital_utilization_path,
+    )
     if sufficiency is None:
         sufficiency = run_data_sufficiency(db_path=db_path, audit_dir=audit_dir) if db_path.exists() else {
             "status": "DATA_ERROR",
@@ -494,6 +873,8 @@ def generate_performance_artifacts(
         "lift_global_vs_recent": str(out_dir / "lift_global_vs_recent.png"),
         "ticker_eligibility_grid": str(out_dir / "ticker_eligibility_grid.png"),
         "context_quality_heatmap": str(out_dir / "context_quality_heatmap.png"),
+        "ngn_hurdle_progress": str(out_dir / "ngn_hurdle_progress.png"),
+        "thin_linkage_progress": str(out_dir / "thin_linkage_progress.png"),
     }
 
     chart_per_ticker_wr_pf(per_ticker, Path(chart_paths["per_ticker_wr_pf"]))
@@ -501,6 +882,8 @@ def generate_performance_artifacts(
     chart_lift_global_vs_recent(l1_metrics, Path(chart_paths["lift_global_vs_recent"]))
     chart_ticker_eligibility_grid(eligibility, Path(chart_paths["ticker_eligibility_grid"]))
     chart_context_quality_heatmap(context, Path(chart_paths["context_quality_heatmap"]))
+    chart_ngn_hurdle_progress(production_tracking, Path(chart_paths["ngn_hurdle_progress"]))
+    chart_thin_linkage_progress(production_tracking, Path(chart_paths["thin_linkage_progress"]))
 
     for name, raw_path in chart_paths.items():
         path = Path(raw_path)
@@ -517,6 +900,7 @@ def generate_performance_artifacts(
         eligibility=eligibility,
         context=context,
         sufficiency=sufficiency,
+        production_tracking=production_tracking,
         warnings=warnings,
         chart_paths=chart_paths,
         db_path=db_path,
@@ -550,6 +934,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
     parser.add_argument("--eligibility", type=Path, default=DEFAULT_ELIGIBILITY)
     parser.add_argument("--context-quality", type=Path, default=DEFAULT_CONTEXT_QUALITY)
+    parser.add_argument("--canonical-snapshot", type=Path, default=DEFAULT_CANONICAL_SNAPSHOT)
+    parser.add_argument("--capital-utilization", type=Path, default=DEFAULT_CAPITAL_UTILIZATION)
     parser.add_argument("--json-metrics", type=Path, default=None)
     args = parser.parse_args(argv)
 
@@ -560,6 +946,8 @@ def main(argv: list[str] | None = None) -> int:
         out_dir=args.out_dir,
         eligibility_path=args.eligibility,
         context_quality_path=args.context_quality,
+        canonical_snapshot_path=args.canonical_snapshot,
+        capital_utilization_path=args.capital_utilization,
         json_metrics_path=(args.json_metrics or (args.out_dir / "metrics_summary.json")),
     )
 

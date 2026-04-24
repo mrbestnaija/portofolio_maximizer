@@ -48,6 +48,47 @@ def _load_json(path: Path) -> Optional[Dict[str, Any]]:
         return None
 
 
+def _canonical_snapshot_contract(snapshot: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    payload = snapshot if isinstance(snapshot, dict) else {}
+    errors: list[str] = []
+    emission_error = str(payload.get("emission_error") or "").strip()
+    schema_version = int(payload.get("schema_version") or 0) if payload else 0
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    alpha = payload.get("alpha_objective") if isinstance(payload.get("alpha_objective"), dict) else {}
+    alpha_quality = payload.get("alpha_model_quality") if isinstance(payload.get("alpha_model_quality"), dict) else {}
+    gate = payload.get("gate") if isinstance(payload.get("gate"), dict) else {}
+    freshness = gate.get("freshness_status") if isinstance(gate.get("freshness_status"), dict) else {}
+    source_contract = payload.get("source_contract") if isinstance(payload.get("source_contract"), dict) else {}
+
+    if emission_error:
+        errors.append(f"emission_error:{emission_error}")
+    if schema_version == 0:
+        errors.append("schema_version_0")
+    elif schema_version < 4:
+        errors.append(f"schema_version_{schema_version}")
+    if str(source_contract.get("status") or "").strip().lower() != "clean":
+        errors.append(f"source_contract:{source_contract.get('status') or 'missing'}")
+    if str(freshness.get("status") or "").strip().lower() != "fresh":
+        errors.append(f"freshness:{freshness.get('status') or 'missing'}")
+    if str(summary.get("evidence_health") or "").strip().lower() != "clean":
+        errors.append(f"evidence_health:{summary.get('evidence_health') or 'missing'}")
+    if not bool(alpha.get("objective_valid", False)):
+        errors.append("objective_valid=false")
+
+    return {
+        "ok": not errors,
+        "errors": errors,
+        "schema_version": schema_version,
+        "emission_error": emission_error or None,
+        "freshness_status": freshness.get("status"),
+        "objective_valid": bool(alpha.get("objective_valid", False)),
+        "alpha_model_quality_status": alpha_quality.get("status"),
+        "trajectory_alarm_active": bool((gate.get("trajectory_alarm") or {}).get("active")),
+        "evidence_health": summary.get("evidence_health"),
+        "source_contract_status": source_contract.get("status"),
+    }
+
+
 @click.command()
 @click.option(
     "--db-path",
@@ -130,6 +171,7 @@ def main(
     nav_rebalance = _load_json(ROOT_PATH / nav_rebalance_path)
     canonical_snapshot = _load_json(ROOT_PATH / canonical_snapshot_path)
     config_proposals = _load_json(ROOT_PATH / config_proposals_path)
+    canonical_snapshot_contract = _canonical_snapshot_contract(canonical_snapshot)
 
     # Best cached strategy configuration (generic higher-order hyperopt output).
     best_strategy: Optional[Dict[str, Any]] = None
@@ -157,6 +199,7 @@ def main(
             "sleeve_promotion_plan": sleeve_plan,
             "nav_rebalance_plan": nav_rebalance,
             "canonical_snapshot": canonical_snapshot,
+            "canonical_snapshot_contract": canonical_snapshot_contract,
             "config_proposals": config_proposals,
         },
         "models": {

@@ -14,6 +14,7 @@ def test_apply_eligibility_gates_writes_expected_lists(tmp_path):
     eligibility_path.write_text(
         json.dumps(
             {
+                "window": {"lookback_days": 30, "state": "rolling_window", "source_view": "production_closed_trades"},
                 "tickers": {
                     "AAPL": {"status": "HEALTHY"},
                     "TSLA": {"status": "LAB_ONLY"},
@@ -34,9 +35,11 @@ def test_apply_eligibility_gates_writes_expected_lists(tmp_path):
     assert result["weak_tickers"] == ["NVDA"]
     assert result["lab_only_tickers"] == ["TSLA"]
     assert result["gate_written"] is True
+    assert result["eligibility_window"]["state"] == "rolling_window"
     assert output_path.exists()
     payload = json.loads(output_path.read_text(encoding="utf-8"))
     assert payload["summary"] == {"HEALTHY": 1, "WEAK": 1, "LAB_ONLY": 1}
+    assert payload["eligibility_window"]["source_view"] == "production_closed_trades"
 
 
 def test_apply_eligibility_gates_missing_input_is_warn_and_empty(tmp_path):

@@ -226,6 +226,54 @@ def test_binding_safe_lift_summary_retains_freshness_fields_only() -> None:
     assert "effective_audits" not in safe
 
 
+def test_infer_openclaw_listener_fallback_target_ignores_whatsapp_phone_number(monkeypatch: pytest.MonkeyPatch) -> None:
+    import scripts.production_audit_gate as mod
+
+    monkeypatch.setattr(
+        mod,
+        "load_cron_jobs_payload",
+        lambda _path: (
+            {
+                "jobs": [
+                    {
+                        "delivery": {
+                            "channel": "whatsapp",
+                            "fallback": {"channel": "telegram", "to": "+2348061573767"},
+                        }
+                    }
+                ]
+            },
+            None,
+        ),
+    )
+
+    assert mod._infer_openclaw_listener_fallback_target() is None
+
+
+def test_infer_openclaw_listener_fallback_target_accepts_telegram_chat_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    import scripts.production_audit_gate as mod
+
+    monkeypatch.setattr(
+        mod,
+        "load_cron_jobs_payload",
+        lambda _path: (
+            {
+                "jobs": [
+                    {
+                        "delivery": {
+                            "channel": "whatsapp",
+                            "fallback": {"channel": "telegram", "to": "telegram:6515478488"},
+                        }
+                    }
+                ]
+            },
+            None,
+        ),
+    )
+
+    assert mod._infer_openclaw_listener_fallback_target() == "telegram:6515478488"
+
+
 def test_main_prefers_structured_summary_over_stdout_metrics(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1218,7 +1266,7 @@ def test_inconclusive_allowed_emits_strict_false_even_when_legacy_phase3_ready(
     assert payload["readiness"]["posture"] == "WARMUP_COVERED_PASS"
 
 
-def test_warmup_covered_posture_detects_proof_and_linkage_gaps_even_when_strict_true(
+def test_warmup_covered_posture_fails_closed_when_linkage_and_proof_gaps_remain(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import scripts.production_audit_gate as mod
@@ -1360,15 +1408,13 @@ def test_warmup_covered_posture_detects_proof_and_linkage_gaps_even_when_strict_
     assert rc == 0
     payload = mod._safe_load_json(output_json)
     assert payload is not None
-    assert payload["phase3_strict_ready"] is True
-    assert payload["posture"] == "WARMUP_COVERED_PASS"
-    assert payload["readiness"]["posture"] == "WARMUP_COVERED_PASS"
+    assert payload["phase3_ready"] is False
+    assert payload["phase3_strict_ready"] is False
+    assert payload["posture"] == "FAIL"
+    assert payload["readiness"]["posture"] == "FAIL"
     assert payload["readiness"]["proof_evidence_ready"] is False
     assert payload["readiness"]["linkage_full_thresholds_pass"] is False
-    assert set(payload["covered_state_reasons"]) == {
-        "proof_evidence_incomplete",
-        "linkage_warmup_exemption",
-    }
+    assert payload["covered_state_reasons"] == []
 
 
 def test_compute_lifecycle_integrity_excludes_legacy_trades(tmp_path: Path) -> None:

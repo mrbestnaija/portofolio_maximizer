@@ -93,6 +93,7 @@ def _write_valid_production_gate_artifact(path: Path) -> None:
     path.write_text(
         json.dumps(
             {
+                "timestamp_utc": "2099-01-01T00:00:00Z",
                 "phase3_ready": True,
                 "phase3_reason": "READY",
                 "lift_inconclusive_allowed": False,
@@ -108,20 +109,126 @@ def _write_valid_canonical_snapshot(path: Path) -> None:
     path.write_text(
         json.dumps(
             {
-                "schema_version": 2,
+                "schema_version": 4,
+                "gate": {
+                    "freshness_status": {
+                        "status": "fresh",
+                        "age_minutes": 15.0,
+                        "expected_max_age_minutes": 1440.0,
+                        "last_expected_emission_utc": "2026-04-18T20:00:00Z",
+                        "last_actual_emission_utc": "2026-04-18T19:45:00Z",
+                    },
+                    "warmup_state": {
+                        "posture": "expired",
+                        "deadline_utc": "2026-04-24T20:00:00Z",
+                        "matched_needed": 0,
+                    },
+                    "trajectory_alarm": {
+                        "active": False,
+                        "days_to_deadline": 5.0,
+                        "matched_needed": 0,
+                        "expected_closes_remaining": 0.0,
+                        "shortfall": 0.0,
+                    },
+                    "post_deadline_time_to_10_estimate": {
+                        "status": "inactive",
+                        "estimated_days": None,
+                    },
+                    "posture": "GENUINE_PASS",
+                    "gate_artifact_age_minutes": 15.0,
+                },
                 "summary": {
                     "ann_roi_pct": 9.86,
+                    "roi_ann_pct": 9.86,
+                    "deployment_pct": 1.83,
+                    "objective_score": 18.05,
+                    "objective_valid": True,
                     "ngn_hurdle_pct": 28.0,
                     "gap_to_hurdle_pp": 18.14,
                     "evidence_health": "clean",
-                    "unattended_gate": "FAIL",
-                    "unattended_ready": False,
+                    "unattended_gate": "PASS",
+                    "unattended_ready": True,
                 },
-                "utilization": {"roi_ann_pct": 9.86},
-                "gate": {"posture": "WARMUP_COVERED_PASS", "gate_artifact_age_minutes": 15.0},
+                "utilization": {"roi_ann_pct": 9.86, "deployment_pct": 1.83},
+                "alpha_objective": {
+                    "roi_ann_pct": 9.86,
+                    "deployment_pct": 1.83,
+                    "objective_score": 18.05,
+                    "objective_valid": True,
+                },
+                "thin_linkage": {
+                    "matched_current": 10,
+                    "matched_needed": 0,
+                    "trajectory_alarm": {
+                        "active": False,
+                        "days_to_deadline": 5.0,
+                        "matched_needed": 0,
+                        "expected_closes_remaining": 0.0,
+                        "shortfall": 0.0,
+                    },
+                    "post_deadline_time_to_10_estimate": {
+                        "status": "inactive",
+                        "estimated_days": None,
+                        "covered_lot_term_days": None,
+                        "new_round_trip_term_days": None,
+                        "covered_lots_remaining": 0,
+                        "matched_needed": 0,
+                        "covered_lot_daily_close_rate": 0.0,
+                        "new_round_trip_daily_rate": 0.0,
+                    },
+                },
                 "source_contract": {
+                    "status": "clean",
+                    "canonical_sources": [
+                        {"metric": "closed_pnl", "source_file": "production_closed_trades", "query_or_key": "production_closed_trades"},
+                        {"metric": "capital", "source_file": "portfolio_cash_state", "query_or_key": "portfolio_cash_state.initial_capital"},
+                        {"metric": "open_risk", "source_file": "trade_executions", "query_or_key": "trade_executions WHERE is_close=0"},
+                        {"metric": "utilization", "source_file": "scripts/compute_capital_utilization.py", "query_or_key": "scripts.compute_capital_utilization.compute_utilization"},
+                    ],
+                    "allowlisted_readers": [
+                        "scripts/emit_canonical_snapshot.py",
+                        "scripts/project_runtime_status.py",
+                        "scripts/institutional_unattended_gate.py",
+                    ],
+                    "violations_found": [],
+                    "scan_timestamp_utc": "2026-04-18T12:00:00Z",
                     "canonical": {"closed_pnl": "production_closed_trades"},
                     "ui_only": {"metrics_summary": "visualizations/performance/metrics_summary.json"},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _write_valid_runtime_status(path: Path, *, ts: str = "2099-01-01T00:00:00Z") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "timestamp_utc": ts,
+                "status": "ok",
+                "strict_mode": False,
+                "check_count": 0,
+                "failed_checks": [],
+                "automation_ready_for_thin_linkage": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _write_valid_run_auto_trader_artifact(path: Path, *, quarantined: bool = False, ts: str = "2099-01-01T00:00:00Z") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "meta": {"ts": ts},
+                "runtime_status": {
+                    "eligibility_snapshot_status": "QUARANTINED" if quarantined else "READY",
+                    "eligibility_snapshot_statuses": ["QUARANTINED"] if quarantined else ["READY"],
+                    "quarantined_cycle_count": 1 if quarantined else 0,
+                    "quarantine_reason": "Eligibility snapshot computation failed" if quarantined else None,
                 },
             }
         ),
@@ -136,6 +243,52 @@ def test_exec_env_check_flags_invalid_host(monkeypatch, tmp_path) -> None:
     check = mod._openclaw_exec_environment_check()
     assert check["ok"] is False
     assert check["signals"] == ["invalid_exec_host"]
+
+
+def test_exec_env_check_resolves_project_home_fallback_when_wsl_home_missing(monkeypatch, tmp_path) -> None:
+    project_root = (
+        tmp_path
+        / "Users"
+        / "Bestman"
+        / "personal_projects"
+        / "portfolio_maximizer_v45"
+        / "portfolio_maximizer_v45"
+    )
+    cfg_path = project_root.parents[2] / ".openclaw" / "openclaw.json"
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "tools": {"exec": {"host": "gateway"}},
+        "agents": {"defaults": {"sandbox": {"mode": "non-main"}}},
+        "acp": {"defaultAgent": "ops"},
+    }
+    cfg_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    monkeypatch.setattr(mod, "PROJECT_ROOT", project_root)
+    monkeypatch.setattr(mod.Path, "home", lambda: tmp_path / "wsl-home")
+
+    check = mod._openclaw_exec_environment_check()
+    assert check["ok"] is True
+    assert check["signals"] == ["exec_env_valid"]
+    assert str(cfg_path) in check["command"]
+    assert str(cfg_path) in check["checked_paths"]
+
+
+def test_exec_env_check_flags_missing_openclaw_config(monkeypatch, tmp_path) -> None:
+    project_root = (
+        tmp_path
+        / "Users"
+        / "Bestman"
+        / "personal_projects"
+        / "portfolio_maximizer_v45"
+        / "portfolio_maximizer_v45"
+    )
+    monkeypatch.setattr(mod, "PROJECT_ROOT", project_root)
+    monkeypatch.setattr(mod.Path, "home", lambda: tmp_path / "wsl-home")
+
+    check = mod._openclaw_exec_environment_check()
+    assert check["ok"] is False
+    assert check["signals"] == ["openclaw_config_missing"]
+    assert "openclaw config missing" in check["stderr"]
 
 
 def test_exec_env_check_accepts_utf8_bom(monkeypatch, tmp_path) -> None:
@@ -244,11 +397,16 @@ def test_exec_env_check_flags_unavailable_docker_sandbox(monkeypatch, tmp_path) 
     assert check["signals"] == ["sandbox_runtime_unavailable"]
 
 
-def test_collect_runtime_status_runs_production_gate_in_unattended_profile(monkeypatch, tmp_path) -> None:
+def test_collect_runtime_status_uses_cached_production_gate_artifact_without_live_run(monkeypatch, tmp_path) -> None:
     project_root = tmp_path / "repo"
     data_dir = project_root / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
     (data_dir / "portfolio_maximizer.db").write_text("", encoding="utf-8")
+    _write_valid_dashboard(project_root / "visualizations" / "dashboard_data.json")
+    _write_valid_persistence_status(project_root / "logs" / "persistence_manager_status.json")
+    _write_valid_production_gate_artifact(project_root / "logs" / "audit_gate" / "production_gate_latest.json")
+    canonical_snapshot = project_root / "logs" / "canonical_snapshot_latest.json"
+    _write_valid_canonical_snapshot(canonical_snapshot)
 
     captured: list[tuple[str, list[str]]] = []
 
@@ -266,6 +424,10 @@ def test_collect_runtime_status_runs_production_gate_in_unattended_profile(monke
         }
 
     monkeypatch.setattr(mod, "PROJECT_ROOT", project_root)
+    monkeypatch.setattr(mod, "DEFAULT_DASHBOARD_PATH", project_root / "visualizations" / "dashboard_data.json")
+    monkeypatch.setattr(mod, "DEFAULT_PERSISTENCE_STATUS_PATH", project_root / "logs" / "persistence_manager_status.json")
+    monkeypatch.setattr(mod, "DEFAULT_PRODUCTION_GATE_ARTIFACT_PATH", project_root / "logs" / "audit_gate" / "production_gate_latest.json")
+    monkeypatch.setattr(mod, "DEFAULT_CANONICAL_SNAPSHOT_PATH", canonical_snapshot)
     monkeypatch.setattr(mod, "_run_check", fake_run_check)
     monkeypatch.setattr(
         mod,
@@ -284,54 +446,51 @@ def test_collect_runtime_status_runs_production_gate_in_unattended_profile(monke
 
     payload = mod.collect_runtime_status(timeout_seconds=1.0)
     assert payload["status"] == "ok"
+    assert all(name != "production_gate" for name, _ in captured)
+    prod_check = next(check for check in payload["checks"] if check["name"] == "production_gate")
+    assert prod_check["ok"] is True
+    assert prod_check["command"] == f"validate {mod.DEFAULT_PRODUCTION_GATE_ARTIFACT_PATH.name}"
+    assert "semantics=" in prod_check["stdout"]
+    assert prod_check["artifact_age_minutes"] is not None
 
-    by_name = {name: cmd for name, cmd in captured}
-    prod_cmd = by_name["production_gate"]
-    assert "--unattended-profile" in prod_cmd
 
-
-def test_collect_runtime_status_uses_longer_timeout_for_production_gate(monkeypatch, tmp_path) -> None:
+def test_collect_runtime_status_fails_closed_when_production_gate_artifact_stale(monkeypatch, tmp_path) -> None:
     project_root = tmp_path / "repo"
     data_dir = project_root / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
     (data_dir / "portfolio_maximizer.db").write_text("", encoding="utf-8")
-
-    captured: list[tuple[str, float]] = []
-
-    def fake_run_check(name, cmd, timeout_seconds, **kwargs):
-        del cmd, kwargs
-        captured.append((str(name), float(timeout_seconds)))
-        return {
-            "name": str(name),
-            "ok": True,
-            "returncode": 0,
-            "duration_seconds": 0.0,
-            "command": str(name),
-            "stdout": "",
-            "stderr": "",
-        }
+    _write_valid_dashboard(project_root / "visualizations" / "dashboard_data.json")
+    _write_valid_persistence_status(project_root / "logs" / "persistence_manager_status.json")
+    _write_valid_production_gate_artifact(project_root / "logs" / "audit_gate" / "production_gate_latest.json")
+    _write_valid_canonical_snapshot(project_root / "logs" / "canonical_snapshot_latest.json")
+    gate_artifact = project_root / "logs" / "audit_gate" / "production_gate_latest.json"
+    payload = json.loads(gate_artifact.read_text(encoding="utf-8"))
+    payload["timestamp_utc"] = "2020-01-01T00:00:00Z"
+    gate_artifact.write_text(json.dumps(payload), encoding="utf-8")
 
     monkeypatch.setattr(mod, "PROJECT_ROOT", project_root)
-    monkeypatch.setattr(mod, "_run_check", fake_run_check)
+    monkeypatch.setattr(mod, "DEFAULT_DASHBOARD_PATH", project_root / "visualizations" / "dashboard_data.json")
+    monkeypatch.setattr(mod, "DEFAULT_PERSISTENCE_STATUS_PATH", project_root / "logs" / "persistence_manager_status.json")
+    monkeypatch.setattr(mod, "DEFAULT_PRODUCTION_GATE_ARTIFACT_PATH", gate_artifact)
+    monkeypatch.setattr(mod, "DEFAULT_CANONICAL_SNAPSHOT_PATH", project_root / "logs" / "canonical_snapshot_latest.json")
+    monkeypatch.setattr(mod, "_run_check", lambda name, cmd, timeout_seconds, **kwargs: _base_ok_check(name))
     monkeypatch.setattr(
         mod,
         "_openclaw_exec_environment_check",
-        lambda: {
-            "name": "openclaw_exec_env",
-            "ok": True,
-            "returncode": 0,
-            "duration_seconds": 0.0,
-            "command": "validate",
-            "stdout": "ok",
-            "stderr": "",
-            "signals": ["exec_env_valid"],
-        },
+        lambda: {**_base_ok_check("openclaw_exec_env"), "signals": ["exec_env_valid"]},
+    )
+    monkeypatch.setattr(
+        mod,
+        "_collect_observability_stack_check",
+        lambda timeout_seconds: {**_base_ok_check("observability_stack"), "stack_status": "ok"},
     )
 
     payload = mod.collect_runtime_status(timeout_seconds=1.0)
-    assert payload["status"] == "ok"
-    by_name = {name: timeout for name, timeout in captured}
-    assert by_name["production_gate"] >= 240.0
+    assert payload["status"] == "degraded"
+    assert "production_gate" in payload["failed_checks"]
+    prod_check = next(check for check in payload["checks"] if check["name"] == "production_gate")
+    assert prod_check["ok"] is False
+    assert "production_gate_artifact_stale" in prod_check["stderr"]
 
 
 def test_collect_runtime_status_strict_fails_on_inconclusive_allowed_gate(monkeypatch, tmp_path) -> None:
@@ -567,18 +726,49 @@ def test_collect_runtime_status_strict_fails_on_degraded_evidence_health(monkeyp
     degraded_snapshot.write_text(
         json.dumps(
             {
-                "schema_version": 2,
+                "schema_version": 4,
+                "gate": {
+                    "freshness_status": {
+                        "status": "fresh",
+                        "age_minutes": 15.0,
+                        "expected_max_age_minutes": 1440.0,
+                    },
+                    "warmup_state": {
+                        "posture": "expired",
+                        "deadline_utc": "2026-04-24T20:00:00Z",
+                        "matched_needed": 0,
+                    },
+                    "trajectory_alarm": {"active": False},
+                    "post_deadline_time_to_10_estimate": {"status": "inactive", "estimated_days": None},
+                },
                 "summary": {
                     "ann_roi_pct": 9.86,
+                    "roi_ann_pct": 9.86,
+                    "deployment_pct": 1.83,
+                    "objective_score": 18.05,
+                    "objective_valid": True,
                     "ngn_hurdle_pct": 28.0,
                     "gap_to_hurdle_pp": 18.14,
                     "evidence_health": "degraded",
-                    "unattended_gate": "FAIL",
-                    "unattended_ready": False,
+                    "unattended_gate": "PASS",
+                    "unattended_ready": True,
                 },
-                "utilization": {"roi_ann_pct": 9.86},
-                "gate": {"posture": "WARMUP_COVERED_PASS", "gate_artifact_age_minutes": 15.0},
+                "utilization": {"roi_ann_pct": 9.86, "deployment_pct": 1.83},
+                "alpha_objective": {
+                    "roi_ann_pct": 9.86,
+                    "deployment_pct": 1.83,
+                    "objective_score": 18.05,
+                    "objective_valid": True,
+                },
+                "thin_linkage": {"matched_current": 10, "matched_needed": 0},
                 "source_contract": {
+                    "status": "clean",
+                    "canonical_sources": [
+                        {"metric": "closed_pnl", "source_file": "production_closed_trades", "query_or_key": "production_closed_trades"}
+                    ],
+                    "allowlisted_readers": ["scripts/project_runtime_status.py"],
+                    "violations_found": [],
+                    "scan_timestamp_utc": "2026-04-18T12:00:00Z",
                     "canonical": {"closed_pnl": "production_closed_trades"},
                     "ui_only": {"metrics_summary": "visualizations/performance/metrics_summary.json"},
                 },
@@ -615,18 +805,49 @@ def test_collect_runtime_status_strict_fails_on_stale_gate_artifact_minutes(monk
     stale_snapshot.write_text(
         json.dumps(
             {
-                "schema_version": 2,
+                "schema_version": 4,
+                "gate": {
+                    "freshness_status": {
+                        "status": "stale",
+                        "age_minutes": 120.0,
+                        "expected_max_age_minutes": 60.0,
+                    },
+                    "warmup_state": {
+                        "posture": "expired",
+                        "deadline_utc": "2026-04-24T20:00:00Z",
+                        "matched_needed": 0,
+                    },
+                    "trajectory_alarm": {"active": False},
+                    "post_deadline_time_to_10_estimate": {"status": "inactive", "estimated_days": None},
+                },
                 "summary": {
                     "ann_roi_pct": 9.86,
+                    "roi_ann_pct": 9.86,
+                    "deployment_pct": 1.83,
+                    "objective_score": 18.05,
+                    "objective_valid": True,
                     "ngn_hurdle_pct": 28.0,
                     "gap_to_hurdle_pp": 18.14,
                     "evidence_health": "clean",
-                    "unattended_gate": "FAIL",
-                    "unattended_ready": False,
+                    "unattended_gate": "PASS",
+                    "unattended_ready": True,
                 },
-                "utilization": {"roi_ann_pct": 9.86},
-                "gate": {"posture": "WARMUP_COVERED_PASS", "gate_artifact_age_minutes": 120.0},
+                "utilization": {"roi_ann_pct": 9.86, "deployment_pct": 1.83},
+                "alpha_objective": {
+                    "roi_ann_pct": 9.86,
+                    "deployment_pct": 1.83,
+                    "objective_score": 18.05,
+                    "objective_valid": True,
+                },
+                "thin_linkage": {"matched_current": 10, "matched_needed": 0},
                 "source_contract": {
+                    "status": "clean",
+                    "canonical_sources": [
+                        {"metric": "closed_pnl", "source_file": "production_closed_trades", "query_or_key": "production_closed_trades"}
+                    ],
+                    "allowlisted_readers": ["scripts/project_runtime_status.py"],
+                    "violations_found": [],
+                    "scan_timestamp_utc": "2026-04-18T12:00:00Z",
                     "canonical": {"closed_pnl": "production_closed_trades"},
                     "ui_only": {"metrics_summary": "visualizations/performance/metrics_summary.json"},
                 },
@@ -648,4 +869,124 @@ def test_collect_runtime_status_strict_fails_on_stale_gate_artifact_minutes(monk
     assert payload["status"] == "degraded"
     strict_canonical = next(check for check in payload["checks"] if check["name"] == "strict_canonical_snapshot")
     assert strict_canonical["ok"] is False
-    assert "stale_gate_artifact:age_minutes=120.00:threshold_minutes=60.00" in strict_canonical["stderr"]
+    assert "freshness_not_fresh:stale" in strict_canonical["stderr"]
+
+
+def test_collect_runtime_status_exposes_automation_ready_for_thin_linkage(monkeypatch, tmp_path) -> None:
+    project_root = tmp_path / "repo"
+    (project_root / "data").mkdir(parents=True, exist_ok=True)
+    (project_root / "data" / "portfolio_maximizer.db").write_text("", encoding="utf-8")
+    _write_valid_dashboard(project_root / "visualizations" / "dashboard_data.json")
+    _write_valid_persistence_status(project_root / "logs" / "persistence_manager_status.json")
+    _write_valid_production_gate_artifact(project_root / "logs" / "audit_gate" / "production_gate_latest.json")
+    runtime_status_path = project_root / "logs" / "runtime_status_latest.json"
+    run_auto_trader_path = project_root / "logs" / "automation" / "run_auto_trader_latest.json"
+    _write_valid_runtime_status(runtime_status_path)
+    _write_valid_run_auto_trader_artifact(run_auto_trader_path, quarantined=False)
+    ready_snapshot = project_root / "logs" / "canonical_snapshot_latest.json"
+    _write_valid_canonical_snapshot(ready_snapshot)
+    payload = json.loads(ready_snapshot.read_text(encoding="utf-8"))
+    payload["thin_linkage"]["matched_current"] = 10
+    payload["thin_linkage"]["matched_needed"] = 10
+    payload["gate"]["warmup_state"]["matched_needed"] = 10
+    payload["gate"]["freshness_status"]["status"] = "fresh"
+    payload["summary"]["evidence_health"] = "clean"
+    ready_snapshot.write_text(json.dumps(payload), encoding="utf-8")
+
+    monkeypatch.setattr(mod, "PROJECT_ROOT", project_root)
+    monkeypatch.setattr(mod, "DEFAULT_DASHBOARD_PATH", project_root / "visualizations" / "dashboard_data.json")
+    monkeypatch.setattr(mod, "DEFAULT_PERSISTENCE_STATUS_PATH", project_root / "logs" / "persistence_manager_status.json")
+    monkeypatch.setattr(mod, "DEFAULT_PRODUCTION_GATE_ARTIFACT_PATH", project_root / "logs" / "audit_gate" / "production_gate_latest.json")
+    monkeypatch.setattr(mod, "DEFAULT_RUNTIME_STATUS_PATH", runtime_status_path)
+    monkeypatch.setattr(mod, "DEFAULT_RUN_AUTO_TRADER_ARTIFACT_PATH", run_auto_trader_path)
+    monkeypatch.setattr(mod, "DEFAULT_CANONICAL_SNAPSHOT_PATH", ready_snapshot)
+    monkeypatch.setattr(mod, "_run_check", lambda name, cmd, timeout_seconds, **kwargs: _base_ok_check(name))
+    monkeypatch.setattr(mod, "_openclaw_exec_environment_check", lambda: {**_base_ok_check("openclaw_exec_env"), "signals": ["exec_env_valid"]})
+    monkeypatch.setattr(mod, "_collect_observability_stack_check", lambda timeout_seconds: {**_base_ok_check("observability_stack"), "stack_status": "ok"})
+
+    payload = mod.collect_runtime_status(timeout_seconds=1.0, strict=False)
+    assert payload["status"] == "ok"
+    assert payload["automation_ready_for_thin_linkage"] is True
+    detail = payload["automation_ready_for_thin_linkage_detail"]
+    assert detail["ready"] is True
+    assert detail["latest_cycle_status"] == "READY"
+    assert detail["thin_linkage_matched_current"] == 10
+    assert detail["thin_linkage_matched_needed"] == 10
+    assert detail["runtime_status_source"].endswith("runtime_status_latest.json")
+
+
+def test_collect_runtime_status_falls_back_to_run_auto_trader_meta_timestamp(monkeypatch, tmp_path) -> None:
+    project_root = tmp_path / "repo"
+    (project_root / "data").mkdir(parents=True, exist_ok=True)
+    (project_root / "data" / "portfolio_maximizer.db").write_text("", encoding="utf-8")
+    _write_valid_dashboard(project_root / "visualizations" / "dashboard_data.json")
+    _write_valid_persistence_status(project_root / "logs" / "persistence_manager_status.json")
+    _write_valid_production_gate_artifact(project_root / "logs" / "audit_gate" / "production_gate_latest.json")
+    run_auto_trader_path = project_root / "logs" / "automation" / "run_auto_trader_latest.json"
+    _write_valid_run_auto_trader_artifact(run_auto_trader_path, quarantined=False)
+    ready_snapshot = project_root / "logs" / "canonical_snapshot_latest.json"
+    _write_valid_canonical_snapshot(ready_snapshot)
+    payload = json.loads(ready_snapshot.read_text(encoding="utf-8"))
+    payload["thin_linkage"]["matched_current"] = 10
+    payload["thin_linkage"]["matched_needed"] = 10
+    payload["gate"]["warmup_state"]["matched_needed"] = 10
+    payload["gate"]["freshness_status"]["status"] = "fresh"
+    payload["summary"]["evidence_health"] = "clean"
+    ready_snapshot.write_text(json.dumps(payload), encoding="utf-8")
+
+    monkeypatch.setattr(mod, "PROJECT_ROOT", project_root)
+    monkeypatch.setattr(mod, "DEFAULT_DASHBOARD_PATH", project_root / "visualizations" / "dashboard_data.json")
+    monkeypatch.setattr(mod, "DEFAULT_PERSISTENCE_STATUS_PATH", project_root / "logs" / "persistence_manager_status.json")
+    monkeypatch.setattr(mod, "DEFAULT_PRODUCTION_GATE_ARTIFACT_PATH", project_root / "logs" / "audit_gate" / "production_gate_latest.json")
+    monkeypatch.setattr(mod, "DEFAULT_RUNTIME_STATUS_PATH", project_root / "logs" / "runtime_status_latest.json")
+    monkeypatch.setattr(mod, "DEFAULT_RUN_AUTO_TRADER_ARTIFACT_PATH", run_auto_trader_path)
+    monkeypatch.setattr(mod, "DEFAULT_CANONICAL_SNAPSHOT_PATH", ready_snapshot)
+    monkeypatch.setattr(mod, "_run_check", lambda name, cmd, timeout_seconds, **kwargs: _base_ok_check(name))
+    monkeypatch.setattr(mod, "_openclaw_exec_environment_check", lambda: {**_base_ok_check("openclaw_exec_env"), "signals": ["exec_env_valid"]})
+    monkeypatch.setattr(mod, "_collect_observability_stack_check", lambda timeout_seconds: {**_base_ok_check("observability_stack"), "stack_status": "ok"})
+
+    payload = mod.collect_runtime_status(timeout_seconds=1.0, strict=False)
+    detail = payload["automation_ready_for_thin_linkage_detail"]
+    assert payload["automation_ready_for_thin_linkage"] is True
+    assert detail["ready"] is True
+    assert detail["runtime_status_source"].endswith("run_auto_trader_latest.json")
+    assert detail["runtime_status_age_seconds"] is not None
+    assert "runtime_status_missing" not in detail["reasons"]
+
+
+def test_collect_runtime_status_marks_automation_ready_false_when_latest_cycle_quarantined(monkeypatch, tmp_path) -> None:
+    project_root = tmp_path / "repo"
+    (project_root / "data").mkdir(parents=True, exist_ok=True)
+    (project_root / "data" / "portfolio_maximizer.db").write_text("", encoding="utf-8")
+    _write_valid_dashboard(project_root / "visualizations" / "dashboard_data.json")
+    _write_valid_persistence_status(project_root / "logs" / "persistence_manager_status.json")
+    _write_valid_production_gate_artifact(project_root / "logs" / "audit_gate" / "production_gate_latest.json")
+    runtime_status_path = project_root / "logs" / "runtime_status_latest.json"
+    run_auto_trader_path = project_root / "logs" / "automation" / "run_auto_trader_latest.json"
+    _write_valid_runtime_status(runtime_status_path)
+    _write_valid_run_auto_trader_artifact(run_auto_trader_path, quarantined=True)
+    ready_snapshot = project_root / "logs" / "canonical_snapshot_latest.json"
+    _write_valid_canonical_snapshot(ready_snapshot)
+    payload = json.loads(ready_snapshot.read_text(encoding="utf-8"))
+    payload["thin_linkage"]["matched_current"] = 10
+    payload["thin_linkage"]["matched_needed"] = 20
+    payload["gate"]["warmup_state"]["matched_needed"] = 20
+    payload["summary"]["evidence_health"] = "clean"
+    ready_snapshot.write_text(json.dumps(payload), encoding="utf-8")
+
+    monkeypatch.setattr(mod, "PROJECT_ROOT", project_root)
+    monkeypatch.setattr(mod, "DEFAULT_DASHBOARD_PATH", project_root / "visualizations" / "dashboard_data.json")
+    monkeypatch.setattr(mod, "DEFAULT_PERSISTENCE_STATUS_PATH", project_root / "logs" / "persistence_manager_status.json")
+    monkeypatch.setattr(mod, "DEFAULT_PRODUCTION_GATE_ARTIFACT_PATH", project_root / "logs" / "audit_gate" / "production_gate_latest.json")
+    monkeypatch.setattr(mod, "DEFAULT_RUNTIME_STATUS_PATH", runtime_status_path)
+    monkeypatch.setattr(mod, "DEFAULT_RUN_AUTO_TRADER_ARTIFACT_PATH", run_auto_trader_path)
+    monkeypatch.setattr(mod, "DEFAULT_CANONICAL_SNAPSHOT_PATH", ready_snapshot)
+    monkeypatch.setattr(mod, "_run_check", lambda name, cmd, timeout_seconds, **kwargs: _base_ok_check(name))
+    monkeypatch.setattr(mod, "_openclaw_exec_environment_check", lambda: {**_base_ok_check("openclaw_exec_env"), "signals": ["exec_env_valid"]})
+    monkeypatch.setattr(mod, "_collect_observability_stack_check", lambda timeout_seconds: {**_base_ok_check("observability_stack"), "stack_status": "ok"})
+
+    payload = mod.collect_runtime_status(timeout_seconds=1.0, strict=False)
+    assert payload["automation_ready_for_thin_linkage"] is False
+    detail = payload["automation_ready_for_thin_linkage_detail"]
+    assert detail["ready"] is False
+    assert "latest_cycle_quarantined" in detail["reasons"]

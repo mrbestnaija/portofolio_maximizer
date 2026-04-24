@@ -1,7 +1,7 @@
 """Tests for emit_canonical_snapshot.py
 
 Pins three invariants:
-1. schema_version field is present and == 2
+1. schema_version field is present and == 4
 2. All canonical keys are present in the output
 3. roi_ann_pct matches compute_utilization() output (utilization backend consistency)
 """
@@ -9,11 +9,14 @@ Pins three invariants:
 import json
 import os
 import sqlite3
+import subprocess
 import tempfile
 import time
 from pathlib import Path
+import sys
 
 import pytest
+import pandas as pd
 from click.testing import CliRunner
 
 import scripts.emit_canonical_snapshot as mod
@@ -89,16 +92,29 @@ def minimal_db(tmp_path):
 class TestCanonicalSnapshot:
 
     def test_schema_version_present_and_correct(self, minimal_db):
-        """schema_version must be present and equal SCHEMA_VERSION (currently 2)."""
+        """schema_version must be present and equal SCHEMA_VERSION (currently 4)."""
         snapshot = emit_snapshot(minimal_db)
         assert "schema_version" in snapshot, "schema_version field missing from snapshot"
-        assert snapshot["schema_version"] == SCHEMA_VERSION == 2
+        assert snapshot["schema_version"] == SCHEMA_VERSION == 4
 
     def test_all_canonical_keys_present(self, minimal_db):
         """All top-level canonical keys must be present."""
         snapshot = emit_snapshot(minimal_db)
-        required = {"schema_version", "generated_utc", "closed_pnl", "capital",
-                    "open_risk", "utilization", "summary", "source_contract"}
+        required = {
+            "schema_version",
+            "generated_utc",
+            "domain_objective_version",
+            "closed_pnl",
+            "capital",
+            "open_risk",
+            "utilization",
+            "summary",
+            "source_contract",
+            "thin_linkage",
+            "alpha_objective",
+            "alpha_model_quality",
+            "gate",
+        }
         missing = required - set(snapshot.keys())
         assert not missing, f"Missing canonical keys: {missing}"
 
@@ -177,8 +193,10 @@ class TestCanonicalSnapshot:
         snapshot = mod.emit_snapshot(minimal_db)
         assert snapshot["gate"]["artifact_path"] == str(audit_gate / "production_gate_latest.json")
         assert snapshot["gate"]["gate_artifact_age_minutes"] >= 119
-        assert snapshot["source_contract"]["canonical"]["gate_artifact"] == str(
-            audit_gate / "production_gate_latest.json"
+        assert snapshot["source_contract"]["canonical"]["gate_artifact"] == "logs/audit_gate/production_gate_latest.json"
+        assert any(
+            entry["metric"] == "gate_artifact"
+            for entry in snapshot["source_contract"]["canonical_sources"]
         )
         assert Path(snapshot["source_contract"]["ui_only"]["metrics_summary"]).as_posix().endswith(
             "visualizations/performance/metrics_summary.json"
@@ -186,13 +204,69 @@ class TestCanonicalSnapshot:
 
     def test_derive_evidence_health_combinatorics(self):
         """Evidence health is degraded when hygiene is degraded or defects require action."""
-        ok = {"status": "ok", "audit_hygiene": {"status": "clean"}, "pipeline_defects": {"action_required": False}}
-        degraded_hygiene = {"status": "ok", "audit_hygiene": {"status": "degraded"}, "pipeline_defects": {"action_required": False}}
-        degraded_defects = {"status": "ok", "audit_hygiene": {"status": "clean"}, "pipeline_defects": {"action_required": True}}
+        fresh_clean = {"status": "fresh"}
+        source_clean = {"status": "clean"}
+        thin_clean = {
+            "audit_hygiene": {"status": "clean"},
+            "pipeline_defects": {"action_required": False},
+            "matched_current": 10,
+        }
+        degraded_hygiene = {
+            "audit_hygiene": {"status": "degraded"},
+            "pipeline_defects": {"action_required": False},
+            "matched_current": 10,
+        }
+        degraded_defects = {
+            "audit_hygiene": {"status": "clean"},
+            "pipeline_defects": {"action_required": True},
+            "matched_current": 10,
+        }
 
-        assert mod._derive_evidence_health(ok) == "clean"
-        assert mod._derive_evidence_health(degraded_hygiene) == "degraded"
-        assert mod._derive_evidence_health(degraded_defects) == "degraded"
+        assert (
+            mod._derive_evidence_health(
+                freshness_status=fresh_clean,
+                source_contract=source_clean,
+                thin_linkage=thin_clean,
+                warmup_posture="expired",
+            )
+            == "clean"
+        )
+        assert (
+            mod._derive_evidence_health(
+                freshness_status=fresh_clean,
+                source_contract=source_clean,
+                thin_linkage=thin_clean,
+                warmup_posture="active",
+            )
+            == "bridge_state"
+        )
+        assert (
+            mod._derive_evidence_health(
+                freshness_status=fresh_clean,
+                source_contract=source_clean,
+                thin_linkage={**thin_clean, "matched_current": 1},
+                warmup_posture="expired",
+            )
+            == "warmup_expired_fail"
+        )
+        assert (
+            mod._derive_evidence_health(
+                freshness_status=fresh_clean,
+                source_contract=source_clean,
+                thin_linkage=degraded_hygiene,
+                warmup_posture="expired",
+            )
+            == "clean"
+        )
+        assert (
+            mod._derive_evidence_health(
+                freshness_status=fresh_clean,
+                source_contract=source_clean,
+                thin_linkage=degraded_defects,
+                warmup_posture="expired",
+            )
+            == "degraded"
+        )
 
     def test_snapshot_matches_gate_artifact_matched_count(
         self, thin_linkage_db, audit_dir_with_two_tsids, tmp_path, monkeypatch
@@ -218,6 +292,76 @@ class TestCanonicalSnapshot:
         assert snapshot["gate"]["matched"] == 3
         assert snapshot["thin_linkage"]["matched_current"] == 3
         assert snapshot["summary"]["evidence_health"] == "degraded"
+
+    def test_alpha_model_quality_rollup_is_surface_visible(self, minimal_db, tmp_path, monkeypatch):
+        """alpha_model_quality must surface the amplitude-hit rollup to the canonical snapshot."""
+        summary_dir = tmp_path / "logs" / "forecast_audits_cache"
+        summary_dir.mkdir(parents=True, exist_ok=True)
+        summary_path = summary_dir / "latest_summary.json"
+        summary_path.write_text(
+            json.dumps(
+                {
+                    "generated_utc": "2026-04-18T12:00:00Z",
+                    "target_amplitude_hit_rate": 0.75,
+                    "target_amplitude_hit_rate_rolling_20": 0.80,
+                    "target_amplitude_hit_count": 3,
+                    "target_amplitude_support": 4,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        monkeypatch.setattr(mod, "FORECAST_AUDIT_SUMMARY_PATH", summary_path)
+
+        snapshot = emit_snapshot(minimal_db)
+        alpha_quality = snapshot["alpha_model_quality"]
+        assert alpha_quality["status"] == "insufficient_audits"
+        assert alpha_quality["value"] == 0.75
+        assert alpha_quality["support"] == 4
+        assert alpha_quality["target_amplitude_hit_rate"] == 0.75
+        assert alpha_quality["target_amplitude_hit_rate_rolling_20"] == 0.80
+        assert snapshot["summary"]["alpha_model_quality"]["target_amplitude_hit_count"] == 3
+        assert snapshot["gate"]["alpha_model_quality_status"] == "insufficient_audits"
+        assert snapshot["domain_objective_version"] == "v1.0.0"
+
+    def test_alpha_model_quality_marks_available_when_support_is_sufficient(self, minimal_db, tmp_path, monkeypatch):
+        summary_dir = tmp_path / "logs" / "forecast_audits_cache"
+        summary_dir.mkdir(parents=True, exist_ok=True)
+        summary_path = summary_dir / "latest_summary.json"
+        summary_path.write_text(
+            json.dumps(
+                {
+                    "generated_utc": "2026-04-18T12:00:00Z",
+                    "target_amplitude_hit_rate": 0.75,
+                    "target_amplitude_hit_rate_rolling_20": 0.80,
+                    "target_amplitude_hit_count": 8,
+                    "target_amplitude_support": 8,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        monkeypatch.setattr(mod, "FORECAST_AUDIT_SUMMARY_PATH", summary_path)
+
+        snapshot = emit_snapshot(minimal_db)
+        assert snapshot["alpha_model_quality"]["status"] == "available"
+        assert snapshot["alpha_model_quality"]["value"] == 0.75
+        assert snapshot["alpha_model_quality"]["support"] == 8
+        assert snapshot["alpha_model_quality"]["target_amplitude_support"] == 8
+        assert snapshot["gate"]["alpha_model_quality_status"] == "available"
+        assert snapshot["gate"]["domain_objective_version"] == "v1.0.0"
+        assert snapshot["domain_objective_version"] == "v1.0.0"
+
+    def test_alpha_model_quality_marks_no_cache_when_missing(self, minimal_db, tmp_path, monkeypatch):
+        missing_summary = tmp_path / "logs" / "forecast_audits_cache" / "latest_summary.json"
+        monkeypatch.setattr(mod, "FORECAST_AUDIT_SUMMARY_PATH", missing_summary)
+
+        snapshot = emit_snapshot(minimal_db)
+        assert snapshot["alpha_model_quality"]["status"] == "no_audit_cache"
+        assert snapshot["alpha_model_quality"]["target_amplitude_hit_rate"] is None
+        assert snapshot["alpha_model_quality"]["value"] is None
+        assert snapshot["alpha_model_quality"]["support"] is None
+        assert snapshot["gate"]["alpha_model_quality_status"] == "no_audit_cache"
 
 
 # ---------------------------------------------------------------------------
@@ -333,10 +477,40 @@ class TestThinLinkageSection:
         _set_thin_linkage_paths(monkeypatch, audit_dir_with_two_tsids)
         snapshot = mod.emit_snapshot(thin_linkage_db)
         tl = snapshot["thin_linkage"]
-        assert sum(tl["covered_lots_by_ticker"].values()) == tl["open_lots_with_audit_coverage"]
+        assert sum(entry["count"] for entry in tl["covered_lots_by_ticker"].values()) == tl["open_lots_with_audit_coverage"]
         # The 2 AMZN open lots both have audit files
-        assert tl["covered_lots_by_ticker"].get("AMZN") == 2
+        assert tl["covered_lots_by_ticker"].get("AMZN", {}).get("count") == 2
         assert tl["open_lots_with_audit_coverage"] == 2
+
+    def test_diagnostic_open_lots_do_not_count_toward_thin_linkage_coverage(
+        self, thin_linkage_db, audit_dir_with_two_tsids, monkeypatch
+    ):
+        """Diagnostic opens must stay out of THIN_LINKAGE counts even if they look live."""
+        conn = sqlite3.connect(str(thin_linkage_db))
+        try:
+            conn.execute(
+                "INSERT INTO trade_executions (id, ticker, trade_date, action, shares, price, "
+                "total_value, is_close, is_synthetic, is_diagnostic, ts_signal_id) "
+                "VALUES (7, 'NVDA', '2026-04-01', 'BUY', 1, 800.0, 800.0, 0, 0, 1, "
+                "'ts_NVDA_20260402_ccdd_0002')"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        production = audit_dir_with_two_tsids
+        (production / "forecast_audit_ts_NVDA_20260402_ccdd_0002.json").write_text(
+            json.dumps({"signal_context": {"ts_signal_id": "ts_NVDA_20260402_ccdd_0002", "ticker": "NVDA"}}),
+            encoding="utf-8",
+        )
+
+        _set_thin_linkage_paths(monkeypatch, production)
+        snapshot = mod.emit_snapshot(thin_linkage_db)
+        tl = snapshot["thin_linkage"]
+        assert tl["open_lots_total"] == 5
+        assert tl["open_lots_with_audit_coverage"] == 2
+        assert tl["open_lots_other_no_coverage"] == 1
+        assert tl["covered_lots_by_ticker"].get("NVDA") is None
 
     def test_legacy_tsids_land_in_legacy_no_coverage(
         self, thin_linkage_db, audit_dir_with_two_tsids, monkeypatch
@@ -430,10 +604,42 @@ class TestThinLinkageSection:
         assert defects["missing_audit_lots"] == 1
         assert defects["misrouted_audit_lots_by_subdir"]["research"] == 1
         assert defects["misrouted_audit_lots_by_subdir"]["production/quarantine"] == 1
-        assert "Investigate 3 canonical-tsid lot(s) without production audits before clearing THIN_LINKAGE" in defects["remediation_steps"]
+        assert "Investigate 2 canonical-tsid lot(s) without production audits before clearing THIN_LINKAGE" in defects["remediation_steps"]
         assert any(step.startswith("Verify AMZN id=") and "restoring to production/" in step for step in defects["remediation_steps"])
         assert "Fix ETL routing: live-mode runs should write to production/, not research/" in defects["remediation_steps"]
         assert tl["pipeline_defects"]["action_required"] is True
+
+    def test_quarantine_only_audit_is_diagnostic_not_blocking(
+        self, thin_linkage_db, tmp_path, monkeypatch
+    ):
+        """A quarantined audit must remain excluded from coverage without blocking readiness by itself."""
+        root = tmp_path / "forecast_audits"
+        production = root / "production"
+        quarantine = production / "quarantine"
+        production.mkdir(parents=True)
+        quarantine.mkdir(parents=True)
+        tsid = "ts_NVDA_20260402_ccdd_0001_no_audit"
+        (quarantine / f"forecast_audit_{tsid}.json").write_text(
+            json.dumps({"signal_context": {"ts_signal_id": tsid, "ticker": "NVDA"}}),
+            encoding="utf-8",
+        )
+        # Keep the two covered AMZN lots in production so the only defect is quarantined evidence.
+        for covered_tsid in ("ts_AMZN_20260402_aabb_0001", "ts_AMZN_20260402_aabb_0002"):
+            (production / f"forecast_audit_{covered_tsid}.json").write_text(
+                json.dumps({"signal_context": {"ts_signal_id": covered_tsid, "ticker": "AMZN"}}),
+                encoding="utf-8",
+            )
+
+        _set_thin_linkage_paths(monkeypatch, production)
+        snapshot = mod.emit_snapshot(thin_linkage_db)
+        tl = snapshot["thin_linkage"]
+        defects = tl["pipeline_defects"]
+        assert defects["canonical_tsid_lots_without_production_audit"] == 1
+        assert defects["quarantined_audit_lots"] == 1
+        assert defects["misrouted_audit_lots_by_subdir"]["production/quarantine"] == 1
+        assert defects["action_required"] is False
+        assert any("quarantined" in step.lower() for step in defects["remediation_steps"])
+        assert tl["open_lots_with_audit_coverage"] == 2
 
     def test_schema_minimal_db_reports_explicit_status(
         self, minimal_db
@@ -545,3 +751,195 @@ class TestThinLinkageSection:
         assert result.exit_code == 0, result.output
         assert "audit hygiene" in result.output
         assert "degraded" in result.output
+
+    def test_cli_writes_fallback_envelope_when_canonical_source_registry_missing(
+        self, minimal_db, tmp_path, monkeypatch
+    ):
+        missing_registry = tmp_path / "config" / "canonical_source_registry.yml"
+        monkeypatch.setattr(mod, "CANONICAL_SOURCE_REGISTRY_PATH", missing_registry)
+
+        out_path = tmp_path / "canonical_snapshot_latest.json"
+        runner = CliRunner()
+        result = runner.invoke(
+            mod.main,
+            ["--db", str(minimal_db), "--output", str(out_path)],
+        )
+
+        assert result.exit_code == 0, result.output
+        snapshot = json.loads(out_path.read_text(encoding="utf-8"))
+        assert snapshot["schema_version"] == 0
+        assert snapshot["schema_version_attempted"] == SCHEMA_VERSION
+        assert "canonical_source_registry.yml not found at" in snapshot["emission_error"]
+        assert snapshot["source_contract"]["status"] == "violation"
+        assert snapshot["source_contract"]["violations_found"]
+
+
+def test_fallback_envelope_uses_v4_for_partial_payload_and_zero_for_empty() -> None:
+    empty = mod._fallback_emission_envelope("boom")
+    partial = mod._fallback_emission_envelope(
+        "boom",
+        partial={"schema_version": 4, "summary": {"evidence_health": "degraded"}},
+    )
+
+    assert empty["schema_version"] == 0
+    assert empty["schema_version_attempted"] == SCHEMA_VERSION
+    assert empty["domain_objective_version"] == "v1.0.0"
+    assert partial["schema_version"] == 4
+    assert partial["schema_version_attempted"] == SCHEMA_VERSION
+    assert partial["emission_error"] == "boom"
+
+
+def test_cli_entrypoint_help_works_standalone() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    proc = subprocess.run(
+        [sys.executable, "scripts/emit_canonical_snapshot.py", "--help"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "emit_canonical_snapshot.py" in proc.stdout
+
+
+def test_freshness_status_normalizes_nyse_market_close_to_utc(tmp_path, monkeypatch) -> None:
+    gate_path = tmp_path / "gate.json"
+    gate_path.write_text("{}", encoding="utf-8")
+    gate_mtime = pd.Timestamp("2026-04-24 19:45:00", tz="UTC").timestamp()
+    import os
+
+    os.utime(gate_path, (gate_mtime, gate_mtime))
+
+    class _FakeCalendar:
+        def __init__(self, market_close: pd.Timestamp) -> None:
+            self.market_close = market_close
+
+        def schedule(self, start_date=None, end_date=None):  # noqa: ANN001
+            del start_date, end_date
+            return pd.DataFrame({"market_close": [self.market_close]})
+
+    class _FakeMcal:
+        def __init__(self, market_close: pd.Timestamp) -> None:
+            self.market_close = market_close
+
+        def get_calendar(self, name: str):  # noqa: ANN001
+            del name
+            return _FakeCalendar(self.market_close)
+
+    generated_dt = pd.Timestamp("2026-04-24 20:15:00", tz="UTC").to_pydatetime()
+
+    monkeypatch.setattr(mod, "mcal", _FakeMcal(pd.Timestamp("2026-04-24 16:00:00", tz="US/Eastern")))
+    eastern_status = mod._build_freshness_status(generated_dt, gate_path)
+
+    monkeypatch.setattr(mod, "mcal", _FakeMcal(pd.Timestamp("2026-04-24 20:00:00", tz="UTC")))
+    utc_status = mod._build_freshness_status(generated_dt, gate_path)
+
+    assert eastern_status["status"] == "fresh"
+    assert utc_status["status"] == "fresh"
+    assert eastern_status["last_expected_emission_utc"] == "2026-04-24T20:00:00Z"
+    assert utc_status["last_expected_emission_utc"] == "2026-04-24T20:00:00Z"
+
+
+def test_freshness_status_falls_back_when_market_schedule_unavailable(tmp_path, monkeypatch) -> None:
+    gate_path = tmp_path / "gate.json"
+    gate_path.write_text("{}", encoding="utf-8")
+    gate_mtime = pd.Timestamp("2026-04-24 20:05:00", tz="UTC").timestamp()
+    import os
+
+    os.utime(gate_path, (gate_mtime, gate_mtime))
+
+    generated_dt = pd.Timestamp("2026-04-24 20:15:00", tz="UTC").to_pydatetime()
+
+    monkeypatch.setattr(mod, "mcal", None)
+    status = mod._build_freshness_status(generated_dt, gate_path)
+
+    assert status["status"] == "fresh"
+    assert status["expected_max_age_minutes"] == 60.0
+    assert status["reason"] == "market_schedule_unavailable_fallback"
+
+
+def test_thin_linkage_trajectory_alarm_uses_covered_close_rate_and_caps_deadline_estimate(
+    tmp_path, monkeypatch
+) -> None:
+    db_path = tmp_path / "thin_linkage.db"
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(
+            """
+            CREATE TABLE trade_executions (
+                id INTEGER PRIMARY KEY,
+                ticker TEXT,
+                ts_signal_id TEXT,
+                trade_date TEXT,
+                is_close INTEGER DEFAULT 0,
+                is_synthetic INTEGER DEFAULT 0,
+                is_diagnostic INTEGER DEFAULT 0,
+                stop_loss REAL,
+                target_price REAL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE VIEW production_closed_trades AS
+            SELECT *
+            FROM trade_executions
+            WHERE is_close = 1
+              AND COALESCE(is_synthetic, 0) = 0
+              AND COALESCE(is_diagnostic, 0) = 0
+            """
+        )
+        conn.executemany(
+            "INSERT INTO trade_executions (id, ticker, ts_signal_id, trade_date, is_close, stop_loss, target_price) VALUES (?, ?, ?, ?, 0, ?, ?)",
+            [
+                (1, "AMZN", "ts_AMZN_1", "2026-04-10", 100.0, 110.0),
+                (2, "AMZN", "ts_AMZN_2", "2026-04-10", 100.0, 110.0),
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    audit_root = tmp_path / "audits"
+    production = audit_root / "production"
+    production.mkdir(parents=True)
+    for tsid in ("ts_AMZN_1", "ts_AMZN_2"):
+        (production / f"forecast_audit_{tsid}.json").write_text(
+            json.dumps({"signal_context": {"ts_signal_id": tsid, "ticker": "AMZN"}}),
+            encoding="utf-8",
+        )
+
+    def _fake_close_rates(conn, audit_root, reference_dt):  # noqa: ANN001
+        del conn, audit_root, reference_dt
+        return {
+            "covered_lot_daily_close_rate": 0.4,
+            "new_round_trip_daily_rate": 0.2,
+            "covered_closed_14d": 6,
+            "total_closed_14d": 10,
+        }
+
+    monkeypatch.setattr(mod, "_query_close_rates", _fake_close_rates)
+    conn = sqlite3.connect(str(db_path))
+    try:
+        result = mod._query_thin_linkage(
+            conn,
+            {"matched": 3},
+            audit_root=audit_root,
+            generated_dt=pd.Timestamp("2026-04-22 20:00:00", tz="UTC").to_pydatetime(),
+        )
+    finally:
+        conn.close()
+
+    assert result["trajectory_alarm"]["active"] is True
+    assert result["trajectory_alarm"]["expected_closes_remaining"] == pytest.approx(0.8)
+    assert result["trajectory_alarm"]["shortfall"] == pytest.approx(6.2)
+    assert result["coverage_ratio_alarm"]["active"] is True
+    assert result["coverage_ratio_alarm"]["severity"] == "critical"  # 0.114 < 0.25 critical threshold
+    assert result["coverage_ratio_alarm"]["ratio"] == pytest.approx(0.114286)
+    assert "warn_threshold" in result["coverage_ratio_alarm"]
+    assert "critical_threshold" in result["coverage_ratio_alarm"]
+    estimate = result["post_deadline_time_to_10_estimate"]
+    assert estimate["status"] == "active"
+    assert estimate["covered_lot_term_days"] == pytest.approx(5.0)
+    assert estimate["new_round_trip_term_days"] == pytest.approx(25.0)
+    assert estimate["estimated_days"] == pytest.approx(30.0)

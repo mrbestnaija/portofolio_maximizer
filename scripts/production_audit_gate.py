@@ -38,6 +38,23 @@ except Exception:  # pragma: no cover - script execution path fallback
     from telemetry_adapter import normalize_telemetry_payload
 
 from utils.evidence_io import write_promoted_json_artifact
+try:
+    from scripts.robustness_thresholds import (
+        LINKAGE_MIN_MATCHED_KEY,
+        LINKAGE_MIN_RATIO_KEY,
+        load_floored_thresholds,
+    )
+except Exception:  # pragma: no cover - script execution path fallback
+    from robustness_thresholds import (  # type: ignore
+        LINKAGE_MIN_MATCHED_KEY,
+        LINKAGE_MIN_RATIO_KEY,
+        load_floored_thresholds,
+    )
+
+try:
+    from scripts.openclaw_cron_contract import is_valid_telegram_target, load_cron_jobs_payload
+except Exception:  # pragma: no cover - script execution path fallback
+    from openclaw_cron_contract import is_valid_telegram_target, load_cron_jobs_payload  # type: ignore
 
 
 # Phase 7.13-C1: central path constants
@@ -239,6 +256,27 @@ def _count_unlinked_closes(db_path: Path, close_ids: Optional[list[int]] = None)
         return count_val, sample_ids, None
     except Exception as exc:
         return None, [], str(exc)
+
+
+def _infer_openclaw_listener_fallback_target() -> Optional[str]:
+    """Best-effort Telegram fallback target inferred from the cron contract."""
+    jobs_path = Path.home() / ".openclaw" / "cron" / "jobs.json"
+    try:
+        payload, _ = load_cron_jobs_payload(jobs_path)
+    except Exception:
+        return None
+    jobs = payload.get("jobs") if isinstance(payload.get("jobs"), list) else []
+    for job in jobs:
+        if not isinstance(job, dict):
+            continue
+        delivery = job.get("delivery") if isinstance(job.get("delivery"), dict) else {}
+        fallback = delivery.get("fallback") if isinstance(delivery.get("fallback"), dict) else {}
+        if str(fallback.get("channel") or "").strip().lower() != "telegram":
+            continue
+        target = str(fallback.get("to") or "").strip()
+        if target and is_valid_telegram_target(target):
+            return target if target.lower().startswith("telegram:") else f"telegram:{target}"
+    return None
 
 
 def _run_reconcile_step(
@@ -1219,8 +1257,8 @@ def main() -> int:
     parser.add_argument(
         "--openclaw-timeout-seconds",
         type=float,
-        default=20.0,
-        help="OpenClaw command timeout in seconds (default: 20).",
+        default=90.0,
+        help="OpenClaw command timeout in seconds (default: 90).",
     )
     args, unknown = parser.parse_known_args()
     _fail_on_unknown_args(unknown)
@@ -1423,34 +1461,21 @@ def main() -> int:
     outcome_matched = _safe_int(window_counts.get("n_outcome_windows_matched"), 0)
     outcome_eligible = _safe_int(window_counts.get("n_outcome_windows_eligible"), 0)
     matched_over_eligible = _safe_ratio(outcome_matched, outcome_eligible)
-    # THR-02 fix: read linkage thresholds from forecaster_monitoring.yml so
-    # they can be tuned without code changes.  Defaults match the prior
-    # hardcoded values (10 / 0.8) and the yaml values above.
-    _linkage_rmse_cfg = _load_regression_monitoring_config(monitor_config)
-    _configured_linkage_min_matched = int(_linkage_rmse_cfg.get("linkage_min_matched", 10) or 10)
-    _configured_linkage_min_ratio = float(_linkage_rmse_cfg.get("linkage_min_ratio", 0.8) or 0.8)
+    # Hard floors are enforced in scripts.robustness_thresholds so YAML edits
+    # can only raise thresholds, never silently lower them.
+    floored_linkage = load_floored_thresholds(monitor_config)
+    _configured_linkage_min_matched = int(floored_linkage.get(LINKAGE_MIN_MATCHED_KEY, 10) or 10)
+    _configured_linkage_min_ratio = float(floored_linkage.get(LINKAGE_MIN_RATIO_KEY, 0.8) or 0.8)
     _linkage_min_matched = _configured_linkage_min_matched
     _linkage_min_ratio = _configured_linkage_min_ratio
-    # Phase 10: During warmup, relax THIN_LINKAGE to a 1-match floor so the
-    # gate does not block when the system is still accumulating live closed
-    # trades. Full thresholds apply once warmup has expired.
     _linkage_warmup_active = not bool(warmup_policy.get("warmup_expired", True))
-    if _linkage_warmup_active:
-        _linkage_min_matched = 1
-        _linkage_min_ratio = 0.0
     _linkage_no_eligible = outcome_eligible == 0
     linkage_full_thresholds_pass = (
         outcome_eligible > 0
         and outcome_matched >= _configured_linkage_min_matched
         and matched_over_eligible >= _configured_linkage_min_ratio
     )
-    linkage_pass = (
-        outcome_eligible > 0
-        and (
-        outcome_matched >= _linkage_min_matched
-        and matched_over_eligible >= _linkage_min_ratio
-        )
-    )
+    linkage_pass = linkage_full_thresholds_pass
 
     non_trade_count = _safe_int(window_counts.get("n_outcome_windows_non_trade_context"), 0)
     invalid_context_count = _safe_int(window_counts.get("n_outcome_windows_invalid_context"), 0)
@@ -1929,13 +1954,22 @@ def main() -> int:
                 ]
                 message = "\n".join([line for line in msg_lines if line is not None])
 
-                results = send_message_multi(
-                    targets=openclaw_targets,
-                    message=message,
-                    command=str(args.openclaw_command or "openclaw"),
-                    cwd=repo_root,
-                    timeout_seconds=float(args.openclaw_timeout_seconds),
-                )
+                fallback_target = _infer_openclaw_listener_fallback_target()
+                previous_fallback_target = os.environ.get("OPENCLAW_LISTENER_FALLBACK_TO")
+                should_restore_fallback_target = bool(fallback_target and not previous_fallback_target)
+                if should_restore_fallback_target:
+                    os.environ["OPENCLAW_LISTENER_FALLBACK_TO"] = fallback_target or ""
+                try:
+                    results = send_message_multi(
+                        targets=openclaw_targets,
+                        message=message,
+                        command=str(args.openclaw_command or "openclaw"),
+                        cwd=repo_root,
+                        timeout_seconds=float(args.openclaw_timeout_seconds),
+                    )
+                finally:
+                    if should_restore_fallback_target:
+                        os.environ.pop("OPENCLAW_LISTENER_FALLBACK_TO", None)
                 for result in results:
                     if result.ok:
                         continue

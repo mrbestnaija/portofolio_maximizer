@@ -23,7 +23,6 @@ NAV_REBALANCE_PATH="${NAV_REBALANCE_PATH:-logs/automation/nav_rebalance_plan_lat
 NAV_HANDOFF_STATUS_PATH="${NAV_HANDOFF_STATUS_PATH:-logs/automation/nav_rebalance_handoff_latest.json}"
 ELIGIBILITY_PATH="${ELIGIBILITY_PATH:-logs/ticker_eligibility.json}"
 ELIGIBILITY_GATES_PATH="${ELIGIBILITY_GATES_PATH:-logs/ticker_eligibility_gates.json}"
-METRICS_SUMMARY_PATH="${METRICS_SUMMARY_PATH:-visualizations/performance/metrics_summary.json}"
 
 echo "[weekly_sleeve_maintenance] summarizing sleeves..."
 "${PYTHON_BIN}" scripts/summarize_sleeves.py \
@@ -40,12 +39,11 @@ echo "[weekly_sleeve_maintenance] generating promotion/demotion plan..."
   --min-trades "$MIN_TRADES"
 
 echo "[weekly_sleeve_maintenance] building shadow-first NAV rebalance plan..."
-"${PYTHON_BIN}" scripts/build_nav_rebalance_plan.py \
+"${PYTHON_BIN}" -m scripts.build_nav_rebalance_plan \
   --eligibility-path "$ELIGIBILITY_PATH" \
   --eligibility-gates-path "$ELIGIBILITY_GATES_PATH" \
   --sleeve-summary-path "$SUMMARY_PATH" \
   --sleeve-plan-path "$PROMO_PLAN_PATH" \
-  --metrics-summary-path "$METRICS_SUMMARY_PATH" \
   --risk-buckets-path "config/risk_buckets.yml" \
   --output "$NAV_REBALANCE_PATH"
 

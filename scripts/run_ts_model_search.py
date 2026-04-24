@@ -25,6 +25,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import click
 import pandas as pd
+import yaml
 
 from etl.database_manager import DatabaseManager
 from etl.time_series_forecaster import (
@@ -42,6 +43,7 @@ from etl.statistical_tests import diebold_mariano
 from risk.barbell_policy import BarbellConfig
 
 ROOT_PATH = Path(__file__).resolve().parent.parent
+DEFAULT_REGIME_SIMILARITY_PATH = ROOT_PATH / "config" / "regime_similarity_weights.yml"
 logger = logging.getLogger(__name__)
 
 
@@ -158,16 +160,70 @@ def _select_primary_model(aggregate_metrics: Dict[str, Dict[str, float]]) -> str
     return sorted(aggregate_metrics.keys())[0]
 
 
+def _load_regime_similarity_weights(path: Path) -> Dict[str, Dict[str, float]]:
+    if not path.exists():
+        return {}
+    try:
+        payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    raw_matrix = payload.get("weights") or payload.get("matrix") or payload
+    if not isinstance(raw_matrix, dict):
+        return {}
+    matrix: Dict[str, Dict[str, float]] = {}
+    for row_name, row_values in raw_matrix.items():
+        if not isinstance(row_values, dict):
+            continue
+        row_key = str(row_name).strip().upper()
+        if not row_key:
+            continue
+        matrix[row_key] = {}
+        for col_name, weight in row_values.items():
+            try:
+                matrix[row_key][str(col_name).strip().upper()] = float(weight)
+            except Exception:
+                continue
+    return matrix
+
+
+def _regime_similarity_weight(
+    matrix: Dict[str, Dict[str, float]],
+    observed_regime: Optional[str],
+    current_regime: Optional[str],
+) -> float:
+    current = str(current_regime or "").strip().upper()
+    observed = str(observed_regime or "").strip().upper()
+    if not current or not observed:
+        return 1.0
+    if current == observed:
+        return 1.0
+    row = matrix.get(current) or {}
+    try:
+        return max(0.0, float(row.get(observed, 1.0)))
+    except Exception:
+        return 1.0
+
+
 def _score_candidate(aggregate_metrics: Dict[str, Dict[str, float]]) -> float:
     """
     Derive a simple scalar score from aggregate metrics.
 
-    Currently: negative RMSE for the primary model (lower RMSE => higher score).
+    Prefer target-hit amplitude when available; otherwise fall back to negative RMSE
+    for the primary model (lower RMSE => higher score).
     """
     if not aggregate_metrics:
         return 0.0
     primary = _select_primary_model(aggregate_metrics)
     metrics = aggregate_metrics.get(primary) or {}
+    for key in ("target_amplitude_hit_rate", "amplitude_hit_rate", "take_profit_hit_rate"):
+        score = metrics.get(key)
+        if score is not None:
+            try:
+                return float(score)
+            except Exception:
+                continue
     rmse_val = metrics.get("rmse")
     if rmse_val is None:
         # Fallback to any metric; keep score monotone decreasing in error.
@@ -248,6 +304,12 @@ def _serialize_config(config: TimeSeriesForecasterConfig) -> Dict[str, Any]:
     help="Use config/model_profiles.yml + config/barbell.yml to select model profiles per (ticker, regime) before building candidates.",
 )
 @click.option(
+    "--regime-similarity-path",
+    default=str(DEFAULT_REGIME_SIMILARITY_PATH),
+    show_default=True,
+    help="YAML matrix of regime similarity weights used for pooled evidence weighting.",
+)
+@click.option(
     "--verbose",
     is_flag=True,
     help="Enable debug logging.",
@@ -262,6 +324,7 @@ def main(
     step_size: int,
     max_folds: int,
     use_profiles: bool,
+    regime_similarity_path: str,
     verbose: bool,
 ) -> None:
     """Run a TS model search and persist CV metrics per candidate."""
@@ -271,6 +334,7 @@ def main(
         raise click.UsageError("At least one ticker is required.")
 
     db = DatabaseManager(db_path=db_path)
+    regime_similarity_matrix = _load_regime_similarity_weights(Path(regime_similarity_path))
 
     barbell_cfg: Optional[BarbellConfig]
     if use_profiles:
@@ -320,6 +384,7 @@ def main(
             continue
 
         returns_series = price_series.pct_change().dropna()
+        current_regime = str(regime or "").strip().upper() or None
 
         # Optionally select a model profile based on sleeve + volatility regime,
         # and consult ts_model_overrides.yml for any explicit (ticker, regime)
@@ -431,6 +496,21 @@ def main(
             folds = result.get("folds") or []
 
             base_score = _score_candidate(aggregate_metrics)
+            primary = _select_primary_model(aggregate_metrics)
+            primary_metrics = aggregate_metrics.get(primary) or {}
+            amplitude_hit_rate = None
+            for key in ("target_amplitude_hit_rate", "amplitude_hit_rate", "take_profit_hit_rate"):
+                if primary_metrics.get(key) is not None:
+                    try:
+                        amplitude_hit_rate = float(primary_metrics.get(key))
+                    except Exception:
+                        amplitude_hit_rate = None
+                    break
+            regime_similarity_weight = _regime_similarity_weight(
+                regime_similarity_matrix,
+                regime_label,
+                current_regime,
+            )
 
             # Stability: coefficient-of-variation based on fold RMSE.
             fold_rmses = rmse_by_candidate.get(candidate_name) or []
@@ -448,9 +528,9 @@ def main(
 
             # Effective score: penalise unstable candidates.
             if stability is None:
-                effective_score = base_score
+                effective_score = base_score * regime_similarity_weight
             else:
-                effective_score = base_score * (0.5 + 0.5 * stability)
+                effective_score = base_score * regime_similarity_weight * (0.5 + 0.5 * stability)
 
             # Diebold–Mariano-style comparison vs baseline (per-fold RMSE proxy).
             dm_payload: Optional[Dict[str, Any]] = None
@@ -479,6 +559,11 @@ def main(
                 "fold_rmse": fold_rmses,
                 "baseline": baseline,
                 "dm_vs_baseline": dm_payload,
+                "target_amplitude_hit_rate": amplitude_hit_rate,
+                "regime_similarity_weight": regime_similarity_weight,
+                "regime_evidence_mode": "weighted_pool" if regime_similarity_matrix else "global_pool",
+                "current_regime": current_regime,
+                "observed_regime": regime_label,
             }
             params_payload = _serialize_config(cfg)
 

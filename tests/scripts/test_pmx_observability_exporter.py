@@ -308,7 +308,7 @@ def test_exporter_surfaces_malformed_cron_jobs_and_fallback_readiness(tmp_path: 
                     "schedule": {"kind": "cron", "expr": "0 * * * *"},
                     "sessionTarget": "isolated",
                     "payload": {"kind": "agentTurn", "message": "ok"},
-                    "delivery": {"channel": "whatsapp", "fallback": {"channel": "telegram", "to": "+2347"}},
+                    "delivery": {"channel": "whatsapp", "fallback": {"channel": "telegram", "to": "telegram:6515478488"}},
                     "state": {"lastStatus": "success", "consecutiveErrors": 0},
                 },
             ]

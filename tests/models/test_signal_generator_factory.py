@@ -278,8 +278,8 @@ class TestSNRGateIntegrity:
             "SNR gate is DISABLED — noisy signals will trade."
         )
 
-    def test_snr_zero_disables_gate(self, tmp_path):
-        """SNR=0 must disable the gate (not block all signals)."""
+    def test_snr_zero_is_floored_to_production_gate(self, tmp_path):
+        """SNR=0 must floor to the production minimum rather than disabling the gate."""
         from models.signal_generator_factory import build_signal_generator
 
         _write_routing_cfg(tmp_path / "sr.yml", {
@@ -287,7 +287,7 @@ class TestSNRGateIntegrity:
             "cost_model": {"min_signal_to_noise": 0},
         })
         gen = build_signal_generator(config_path=tmp_path / "sr.yml")
-        assert gen._min_signal_to_noise == pytest.approx(0.0)
+        assert gen._min_signal_to_noise == pytest.approx(1.5)
 
     def test_snr_via_override_wins_over_yaml(self, tmp_path):
         """ts_cfg_overrides cost_model must override YAML cost_model."""

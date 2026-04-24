@@ -19,6 +19,20 @@ def test_record_run_provenance_sets_profitability_proof_false():
     db.close()
 
 
+def test_record_run_provenance_marks_profitability_proof_false_for_synthetic_data_source():
+    db = DatabaseManager(":memory:")
+    db.record_run_provenance(
+        run_id="run_2",
+        execution_mode="live",
+        data_source="synthetic",
+        synthetic_dataset_id="syn_test",
+        synthetic_generator_version="v1",
+    )
+    assert db.get_metadata("profitability_proof") == "false"
+    assert db.get_metadata("profitability_proof_reason") == "synthetic_data"
+    db.close()
+
+
 def test_data_provenance_marks_synthetic_when_trades_tagged(tmp_path):
     db_path = tmp_path / "synthetic.db"
     db = DatabaseManager(str(db_path))

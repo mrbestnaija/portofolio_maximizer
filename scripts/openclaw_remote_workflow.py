@@ -42,6 +42,7 @@ from scripts.openclaw_cron_contract import load_cron_jobs_payload, summarize_cro
 OPENCLAW_CONFIG = Path.home() / ".openclaw" / "openclaw.json"
 CRON_JOBS_PATH = Path.home() / ".openclaw" / "cron" / "jobs.json"
 OPENCLAW_MAINTENANCE_PATH = PROJECT_ROOT / "logs" / "automation" / "openclaw_maintenance_latest.json"
+OPENCLAW_MAINTENANCE_STATE_PATH = PROJECT_ROOT / "logs" / "automation" / "openclaw_maintenance_state.json"
 PRIMARY_CHANNEL_DEFAULT = str(os.getenv("OPENCLAW_CHANNEL", "whatsapp")).strip().lower() or "whatsapp"
 _GATEWAY_PORT = 18789
 
@@ -125,6 +126,12 @@ def _payload_age_minutes(path: Path, payload: Dict[str, Any]) -> Optional[float]
 def _load_recent_maintenance_payload() -> Tuple[Dict[str, Any], Optional[float]]:
     payload = _read_json_file(OPENCLAW_MAINTENANCE_PATH)
     age_minutes = _payload_age_minutes(OPENCLAW_MAINTENANCE_PATH, payload) if payload else None
+    return payload, age_minutes
+
+
+def _load_recent_maintenance_state() -> Tuple[Dict[str, Any], Optional[float]]:
+    payload = _read_json_file(OPENCLAW_MAINTENANCE_STATE_PATH)
+    age_minutes = _payload_age_minutes(OPENCLAW_MAINTENANCE_STATE_PATH, payload) if payload else None
     return payload, age_minutes
 
 
@@ -213,12 +220,12 @@ def _gateway_local_ping() -> Tuple[bool, str]:
         return False, str(exc)
 
 
-def _load_live_channels_payload(timeout: float = 12.0) -> Optional[Dict[str, Any]]:
+def _load_live_channels_payload(timeout: float = 20.0) -> Optional[Dict[str, Any]]:
     rc, payload, _, _ = _run_openclaw_json(["channels", "status"], timeout=timeout)
     return payload if rc == 0 and isinstance(payload, dict) else None
 
 
-def _load_live_channels_status(timeout: float = 12.0) -> Dict[str, Any]:
+def _load_live_channels_status(timeout: float = 20.0) -> Dict[str, Any]:
     started = time.monotonic()
     rc, payload, out, err = _run_openclaw_json(["channels", "status"], timeout=timeout)
     elapsed_ms = int(round((time.monotonic() - started) * 1000.0))
@@ -239,6 +246,73 @@ def _load_live_channels_status(timeout: float = 12.0) -> Dict[str, Any]:
         "stdout": out[:500],
         "stderr": err[:200],
     }
+
+
+def _load_channels_status_context(
+    *,
+    timeout: float = 20.0,
+    prefer_recent_maintenance: bool = True,
+    maintenance_max_age_minutes: float = 15.0,
+) -> Dict[str, Any]:
+    maintenance_payload, maintenance_age_minutes = _load_recent_maintenance_payload()
+    if prefer_recent_maintenance and isinstance(maintenance_payload, dict):
+        steps = maintenance_payload.get("steps") if isinstance(maintenance_payload.get("steps"), dict) else {}
+        snapshot = (
+            steps.get("channels_status_snapshot")
+            if isinstance(steps.get("channels_status_snapshot"), dict)
+            else {}
+        )
+        if maintenance_age_minutes is not None and maintenance_age_minutes <= maintenance_max_age_minutes:
+            if snapshot:
+                return {
+                    "rc": 0,
+                    "payload": snapshot,
+                    "parsed": True,
+                    "elapsed_ms": 0,
+                    "timeout": False,
+                    "stdout": "",
+                    "stderr": "",
+                    "source": "maintenance_snapshot",
+                    "maintenance_age_minutes": round(maintenance_age_minutes, 2),
+                }
+
+    maintenance_state, maintenance_state_age_minutes = _load_recent_maintenance_state()
+    if prefer_recent_maintenance and isinstance(maintenance_state, dict):
+        snapshot = (
+            maintenance_state.get("last_channels_status_snapshot")
+            if isinstance(maintenance_state.get("last_channels_status_snapshot"), dict)
+            else {}
+        )
+        if snapshot and maintenance_state_age_minutes is not None and maintenance_state_age_minutes <= maintenance_max_age_minutes:
+            return {
+                "rc": 0,
+                "payload": snapshot,
+                "parsed": True,
+                "elapsed_ms": 0,
+                "timeout": False,
+                "stdout": "",
+                "stderr": "",
+                "source": "maintenance_state_snapshot",
+                "maintenance_state_age_minutes": round(maintenance_state_age_minutes, 2),
+            }
+
+    if prefer_recent_maintenance and isinstance(maintenance_payload, dict):
+        if maintenance_age_minutes is not None and maintenance_age_minutes <= maintenance_max_age_minutes:
+            return {
+                "rc": 0,
+                "payload": None,
+                "parsed": False,
+                "elapsed_ms": 0,
+                "timeout": False,
+                "stdout": "",
+                "stderr": "",
+                "source": "maintenance_report",
+                "maintenance_age_minutes": round(maintenance_age_minutes, 2),
+            }
+
+    channels_info = _load_live_channels_status(timeout=timeout)
+    channels_info["source"] = "live"
+    return channels_info
 
 
 def _channel_row(payload: Dict[str, Any], channel: str) -> Dict[str, Any]:
@@ -803,7 +877,7 @@ def _evaluate_overall(checks: List[Dict[str, Any]]) -> str:
 
 def cmd_status(as_json: bool = False) -> int:
     cfg = _load_config()
-    channels_info = _load_live_channels_status()
+    channels_info = _load_channels_status_context()
     channels_payload = channels_info.get("payload") if isinstance(channels_info.get("payload"), dict) else None
     maintenance_payload, maintenance_age_minutes = _load_recent_maintenance_payload()
 
@@ -859,7 +933,7 @@ def cmd_status(as_json: bool = False) -> int:
 
 def cmd_health(as_json: bool = False) -> int:
     cfg = _load_config()
-    channels_info = _load_live_channels_status()
+    channels_info = _load_channels_status_context()
     channels_payload = channels_info.get("payload") if isinstance(channels_info.get("payload"), dict) else None
     maintenance_payload, maintenance_age_minutes = _load_recent_maintenance_payload()
     gateway = _check_gateway(
@@ -1164,8 +1238,15 @@ def cmd_gateway_restart(as_json: bool = False) -> int:
 def cmd_failover_test(as_json: bool = False) -> int:
     jobs = _load_cron_jobs()
     wa_jobs = [j for j in jobs if j.get("delivery", {}).get("channel") == "whatsapp" and j.get("enabled")]
-    with_fallback = [j for j in wa_jobs if "fallback" in j.get("delivery", {})]
-    without_fallback = [j for j in wa_jobs if "fallback" not in j.get("delivery", {})]
+    summary = summarize_cron_jobs({"jobs": jobs})
+    valid_fallback_jobs = summary.get("fallback_ready_jobs") if isinstance(summary.get("fallback_ready_jobs"), list) else []
+    valid_fallback_names = {
+        str(job.get("name") or "").strip()
+        for job in valid_fallback_jobs
+        if isinstance(job, dict) and str(job.get("name") or "").strip()
+    }
+    with_fallback = [j for j in wa_jobs if str(j.get("name") or "").strip() in valid_fallback_names]
+    without_fallback = [j for j in wa_jobs if str(j.get("name") or "").strip() not in valid_fallback_names]
 
     result = {
         "check": "failover_config",
@@ -1173,7 +1254,8 @@ def cmd_failover_test(as_json: bool = False) -> int:
         "with_telegram_fallback": len(with_fallback),
         "without_fallback": len(without_fallback),
         "missing_fallback": [j["name"] for j in without_fallback],
-        "status": "OK" if not without_fallback else "WARN",
+        "delivery_fallback_invalid_count": int(summary.get("delivery_fallback_invalid_count", 0) or 0),
+        "status": "OK" if not without_fallback and int(summary.get("delivery_fallback_invalid_count", 0) or 0) == 0 else "WARN",
     }
     if as_json:
         print(json.dumps(result, indent=2))

@@ -7,7 +7,8 @@ the string "0" when the variable is set to 0, and bool("0") is True in Python.
 
 Single source of truth:
   - parse_env_bool(name) — returns bool (not Optional[bool])
-  - is_synthetic_mode()  — returns bool, checks SYNTHETIC_ONLY + DATA_SOURCE
+  - is_synthetic_mode()  — returns bool, checks SYNTHETIC_ONLY, explicit
+    synthetic data-source hints, execution_mode, and env fallbacks.
 """
 
 import os
@@ -57,15 +58,17 @@ def parse_env_bool(name: str, default: bool = False) -> bool:
 def is_synthetic_mode(
     *,
     execution_mode: Optional[str] = None,
+    data_source: Optional[str] = None,
 ) -> bool:
     """Return True when the runtime should be treated as synthetic.
 
     Decision hierarchy (first match wins):
       1. SYNTHETIC_ONLY=1/true/yes → synthetic
-      2. DATA_SOURCE=synthetic or PMX_PREFERRED_DATA_SOURCE=synthetic → synthetic
-      3. execution_mode arg == "synthetic" → synthetic
-      4. EXECUTION_MODE=synthetic env var → synthetic
-      5. Everything else → real
+      2. explicit data_source arg == "synthetic" → synthetic
+      3. DATA_SOURCE=synthetic or PMX_PREFERRED_DATA_SOURCE=synthetic → synthetic
+      4. execution_mode arg == "synthetic" → synthetic
+      5. EXECUTION_MODE=synthetic or PMX_EXECUTION_MODE=synthetic → synthetic
+      6. Everything else → real
 
     This is the single authoritative check for whether trades should be
     classified as is_synthetic=1 at the execution layer.  Call it once and
@@ -79,6 +82,8 @@ def is_synthetic_mode(
         False → treat as real     (is_synthetic=0 on trade records).
     """
     if parse_env_bool("SYNTHETIC_ONLY"):
+        return True
+    if data_source is not None and str(data_source).strip().lower() == "synthetic":
         return True
     for env_name in ("DATA_SOURCE", "PMX_PREFERRED_DATA_SOURCE"):
         src = (os.getenv(env_name) or "").strip().lower()

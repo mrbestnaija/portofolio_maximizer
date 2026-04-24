@@ -26,6 +26,7 @@ import pandas as pd
 
 from ai_llm.signal_validator import SignalValidator
 from etl.database_manager import DatabaseManager
+from etl.env_flags import is_synthetic_mode
 from etl.timestamp_utils import ensure_utc, utc_now, ensure_utc_index
 from execution.lob_simulator import LOBConfig, simulate_market_order_fill
 
@@ -932,10 +933,7 @@ class PaperTradingEngine:
             entry_atr=entry_atr,
             is_diagnostic=1 if diag_mode else 0,
             is_synthetic=_forced_is_synthetic if _forced_is_synthetic is not None else (
-                1 if (
-                    (data_source and "synthetic" in str(data_source).lower())
-                    or str(execution_mode or "").lower() == "synthetic"
-                ) else 0
+                1 if is_synthetic_mode(execution_mode=execution_mode, data_source=data_source) else 0
             ),
             is_forced_exit=1 if bool(signal.get("forced_exit")) else 0,
         )

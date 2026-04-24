@@ -38,6 +38,7 @@ DEFAULT_OUTPUT_PATH = ROOT_PATH / "logs" / "automation" / "nav_allocation_latest
 DEFAULT_STAGED_CONFIG_PATH = ROOT_PATH / "config" / "barbell.staged.yml"
 DEFAULT_STATUS_PATH = ROOT_PATH / "logs" / "automation" / "nav_rebalance_handoff_latest.json"
 DEFAULT_STATUS_HISTORY_ROOT = ROOT_PATH / "logs" / "automation" / "nav_rebalance_handoff_history"
+DEFAULT_CANONICAL_SNAPSHOT_PATH = ROOT_PATH / "logs" / "canonical_snapshot_latest.json"
 
 
 def _utc_now() -> str:
@@ -71,6 +72,27 @@ def _tail_text(text: str | None, *, lines: int = 30) -> str:
     if len(parts) <= lines:
         return text
     return "\n".join(parts[-lines:])
+
+
+def _extract_matched_current(snapshot: dict[str, Any]) -> Optional[int]:
+    if not isinstance(snapshot, dict):
+        return None
+    thin = snapshot.get("thin_linkage") if isinstance(snapshot.get("thin_linkage"), dict) else {}
+    gate = snapshot.get("gate") if isinstance(snapshot.get("gate"), dict) else {}
+    for candidate in (
+        thin.get("matched_current"),
+        gate.get("matched"),
+        snapshot.get("matched_current"),
+    ):
+        try:
+            if candidate is None:
+                continue
+            value = int(candidate)
+            if value >= 0:
+                return value
+        except Exception:
+            continue
+    return None
 
 
 def _validate_status(payload: dict[str, Any]) -> bool | tuple[bool, str]:
@@ -110,17 +132,21 @@ def run_nav_rebalance_handoff(
     output_path: Path = DEFAULT_OUTPUT_PATH,
     staged_config_path: Optional[Path] = DEFAULT_STAGED_CONFIG_PATH,
     status_path: Path = DEFAULT_STATUS_PATH,
+    canonical_snapshot_path: Path = DEFAULT_CANONICAL_SNAPSHOT_PATH,
 ) -> dict[str, Any]:
     plan_path = Path(plan_path)
     config_path = Path(config_path)
     output_path = Path(output_path)
     staged_config_path = Path(staged_config_path) if staged_config_path else None
     status_path = Path(status_path)
+    canonical_snapshot_path = Path(canonical_snapshot_path)
 
     plan = _load_json(plan_path)
     rollout = _load_rollout(plan)
     blockers = [str(item) for item in rollout.get("live_apply_blockers") or [] if str(item).strip()]
     live_apply_allowed = bool(rollout.get("live_apply_allowed", False))
+    pre_snapshot = _load_json(canonical_snapshot_path)
+    pre_matched_current = _extract_matched_current(pre_snapshot)
 
     payload: dict[str, Any] = {
         "generated_utc": _utc_now(),
@@ -136,6 +162,11 @@ def run_nav_rebalance_handoff(
         "gate_lift_candidate": bool(rollout.get("gate_lift_candidate", False)),
         "gate_lift_ready": bool(rollout.get("gate_lift_ready", False)),
         "blockers": blockers,
+        "canonical_snapshot_path": str(canonical_snapshot_path),
+        "pre_matched_current": pre_matched_current,
+        "post_matched_current": None,
+        "matched_current_delta": None,
+        "reverted": False,
         "plan_summary": plan.get("summary") if isinstance(plan.get("summary"), dict) else {},
         "plan_evidence_contract": plan.get("evidence_contract") if isinstance(plan.get("evidence_contract"), dict) else {},
         "apply_rc": None,
@@ -196,6 +227,61 @@ def run_nav_rebalance_handoff(
         payload["action_taken"] = "APPLY"
         payload["exit_code"] = 0
         payload["note"] = "live_apply_allowed true; allocation materialized."
+        emit_script = ROOT_PATH / "scripts" / "emit_canonical_snapshot.py"
+        emit_cmd = [str(sys.executable), str(emit_script), "--output", str(canonical_snapshot_path), "--json"]
+        emit_run = subprocess.run(emit_cmd, capture_output=True, text=True)
+        payload["emit_command"] = emit_cmd
+        payload["emit_rc"] = int(emit_run.returncode)
+        payload["emit_stdout_tail"] = _tail_text(emit_run.stdout)
+        payload["emit_stderr_tail"] = _tail_text(emit_run.stderr)
+        if emit_run.returncode != 0:
+            payload["status"] = "ERROR"
+            payload["action_taken"] = "EMIT_FAILED"
+            payload["exit_code"] = int(emit_run.returncode)
+            payload["blockers"] = sorted({*payload["blockers"], "emit_snapshot_failed"})
+            payload["note"] = "emit_canonical_snapshot.py returned non-zero after apply."
+            _write_status_artifact(status_path=status_path, payload=payload)
+            return payload
+        post_snapshot = _load_json(canonical_snapshot_path)
+        post_matched_current = _extract_matched_current(post_snapshot)
+        payload["post_matched_current"] = post_matched_current
+        if pre_matched_current is not None and post_matched_current is not None:
+            payload["matched_current_delta"] = int(post_matched_current - pre_matched_current)
+        if (
+            pre_matched_current is not None
+            and post_matched_current is not None
+            and post_matched_current < pre_matched_current
+        ):
+            rollback_cmd = [
+                str(sys.executable),
+                str(apply_script),
+                "--plan-path",
+                str(plan_path),
+                "--config-path",
+                str(config_path),
+                "--output",
+                str(output_path),
+                "--revert",
+            ]
+            if staged_config_path:
+                rollback_cmd.extend(["--staged-config", str(staged_config_path)])
+            rollback_run = subprocess.run(rollback_cmd, capture_output=True, text=True)
+            payload["rollback_command"] = rollback_cmd
+            payload["rollback_rc"] = int(rollback_run.returncode)
+            payload["rollback_stdout_tail"] = _tail_text(rollback_run.stdout)
+            payload["rollback_stderr_tail"] = _tail_text(rollback_run.stderr)
+            payload["reverted"] = bool(rollback_run.returncode == 0)
+            if rollback_run.returncode == 0:
+                payload["status"] = "ROLLED_BACK"
+                payload["action_taken"] = "ROLLBACK"
+                payload["revert_reason"] = "matched_current_regressed"
+                payload["note"] = "matched_current regressed after apply; rollback executed."
+            else:
+                payload["status"] = "ERROR"
+                payload["action_taken"] = "ROLLBACK_FAILED"
+                payload["revert_reason"] = "matched_current_regressed"
+                payload["exit_code"] = int(rollback_run.returncode)
+                payload["blockers"] = sorted({*payload["blockers"], "rollback_failed"})
     else:
         payload["status"] = "ERROR"
         payload["action_taken"] = "APPLY_FAILED"
@@ -213,6 +299,7 @@ def run_nav_rebalance_handoff(
 @click.option("--output", default=str(DEFAULT_OUTPUT_PATH), show_default=True)
 @click.option("--staged-config", default=str(DEFAULT_STAGED_CONFIG_PATH), show_default=True)
 @click.option("--status-output", default=str(DEFAULT_STATUS_PATH), show_default=True)
+@click.option("--canonical-snapshot", default=str(DEFAULT_CANONICAL_SNAPSHOT_PATH), show_default=True)
 @click.option("--json", "emit_json", is_flag=True, default=False, help="Print the handoff status as JSON.")
 def main(
     plan_path: str,
@@ -220,6 +307,7 @@ def main(
     output: str,
     staged_config: str,
     status_output: str,
+    canonical_snapshot: str,
     emit_json: bool,
 ) -> None:
     result = run_nav_rebalance_handoff(
@@ -228,6 +316,7 @@ def main(
         output_path=Path(output),
         staged_config_path=Path(staged_config) if staged_config else None,
         status_path=Path(status_output),
+        canonical_snapshot_path=Path(canonical_snapshot),
     )
 
     if emit_json:

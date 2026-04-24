@@ -78,10 +78,11 @@ signal_routing:
       include_fill_timestamp: true
 
   position_management:
-    # Anti-pyramiding guardrail: a ticker may have at most one open lot before
-    # new BUYs are demoted to HOLD. This preserves THIN_LINKAGE accumulation and
-    # avoids repeated opens delaying close-linkage evidence.
-    max_open_lots_per_ticker: 1
+    # Anti-pyramiding guardrail: a ticker may have at most 2 open lots at once.
+    # Set to 2 (not 1) so that, once existing lots close naturally, the next cycle
+    # can immediately open a new position on covered tickers — accumulating THIN_LINKAGE
+    # without a dead period. Tighten to 1 after the current 58-lot book is below 1 per ticker.
+    max_open_lots_per_ticker: 2
 
   # Deprecated routing mode hint (currently no-op; runtime derives mode from active flags).
   routing_mode: "TIME_SERIES_PRIMARY_LLM_FALLBACK"  # Options:

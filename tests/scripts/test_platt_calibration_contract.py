@@ -909,6 +909,30 @@ class TestJsonlSyntheticFilter:
         assert confs == [], "synthetic entries should be excluded from Platt training"
         assert wins == []
 
+    def test_data_source_synthetic_entries_excluded(self, tmp_path):
+        """Entries with synthetic data_source hints must be dropped even if execution_mode is live."""
+        rows = [
+            {
+                "action": "BUY",
+                "execution_mode": "live",
+                "data_source": "synthetic",
+                "confidence": 0.70,
+                "outcome": {"win": True},
+            },
+            {
+                "action": "SELL",
+                "execution_mode": "auto",
+                "market_context": {"data_source": "synthetic"},
+                "confidence": 0.60,
+                "outcome": {"win": False},
+            },
+        ]
+        log_dir = self._make_jsonl_tempfile(tmp_path, rows)
+        gen = self._build_generator(log_dir)
+        confs, wins = gen._load_jsonl_outcome_pairs(limit=100)
+        assert confs == [], "synthetic data_source hints should be excluded from Platt training"
+        assert wins == []
+
     def test_live_entries_included(self, tmp_path):
         """Entries with execution_mode='live' (or absent) must be included."""
         rows = [

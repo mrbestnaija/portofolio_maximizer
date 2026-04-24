@@ -34,6 +34,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 
+from scripts.compute_ticker_eligibility import compute_eligibility
+
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
@@ -77,7 +79,7 @@ logger = logging.getLogger(__name__)
 # DB helpers
 # ---------------------------------------------------------------------------
 
-def _load_outcome_map(db_path: Path) -> Tuple[Dict[str, float], str]:
+def _load_outcome_map(db_path: Path) -> Tuple[Dict[str, Dict[str, Any]], str]:
     """
     Returns (outcome_map, status) where status is one of:
       "ok"         — DB found and queried successfully (map may be empty if no closed trades)
@@ -92,23 +94,49 @@ def _load_outcome_map(db_path: Path) -> Tuple[Dict[str, float], str]:
     try:
         conn = sqlite3.connect(str(db_path))
         cols = {row[1] for row in conn.execute("PRAGMA table_info(trade_executions)").fetchall()}
+        has_ticker_status_snapshot = "ticker_status_snapshot" in cols
         where = [
             "is_close = 1",
             "is_diagnostic = 0",
             "is_synthetic = 0",
             "ts_signal_id IS NOT NULL",
             "ts_signal_id NOT LIKE 'legacy_%'",
-            "realized_pnl IS NOT NULL",
         ]
         if "is_contaminated" in cols:
             where.append("is_contaminated = 0")
+        select_cols = [
+            "ts_signal_id",
+            "realized_pnl",
+            "exit_reason",
+            "holding_period_days",
+            "effective_horizon",
+            "ticker",
+        ]
+        if has_ticker_status_snapshot:
+            select_cols.append("ticker_status_snapshot")
         rows = conn.execute(
-            "SELECT ts_signal_id, realized_pnl "
+            f"SELECT {', '.join(select_cols)} "
             "FROM trade_executions "
             "WHERE " + " AND ".join(where)
         ).fetchall()
         conn.close()
-        return {r[0]: float(r[1]) for r in rows}, "ok"
+        outcome_map: Dict[str, Dict[str, Any]] = {}
+        for r in rows:
+            tsid = str(r[0] or "").strip()
+            if not tsid:
+                continue
+            ticker_status_snapshot = None
+            if has_ticker_status_snapshot and len(r) > 6:
+                ticker_status_snapshot = str(r[6] or "").strip().upper() or None
+            outcome_map[tsid] = {
+                "realized_pnl": float(r[1] or 0.0) if r[1] is not None else None,
+                "exit_reason": str(r[2] or "").strip().upper() or None,
+                "holding_period_at_exit": int(r[3]) if r[3] is not None else None,
+                "effective_horizon": int(r[4]) if r[4] is not None else None,
+                "ticker": str(r[5] or "").strip().upper() or None,
+                "ticker_status_snapshot": ticker_status_snapshot,
+            }
+        return outcome_map, "ok"
     except Exception as exc:
         logger.error("DB query failed (%s): %s", db_path, exc)
         return {}, "db_error"
@@ -163,6 +191,12 @@ def accumulate(
       n_candidates, n_matched, n_new, n_total, n_by_source, feature_fill_rates
     """
     outcome_map, db_status = _load_outcome_map(db_path)
+    eligibility_snapshot = compute_eligibility(db_path=db_path)
+    ticker_status_map = {
+        str(ticker).upper(): str(info.get("status") or "LAB_ONLY").upper()
+        for ticker, info in (eligibility_snapshot.get("tickers") or {}).items()
+        if str(ticker).strip()
+    }
     candidates = _load_jsonl_candidates(jsonl_path)
 
     logger.info(
@@ -200,8 +234,18 @@ def accumulate(
             continue
 
         n_matched += 1
-        realized_pnl = outcome_map[signal_id]
-        y_directional = 1 if realized_pnl > 0 else 0
+        outcome = outcome_map[signal_id]
+        realized_pnl = outcome.get("realized_pnl")
+        exit_reason = str(outcome.get("exit_reason") or "").strip().upper() or None
+        holding_period_at_exit = outcome.get("holding_period_at_exit")
+        effective_horizon = outcome.get("effective_horizon")
+        stored_ticker_status_snapshot = str(outcome.get("ticker_status_snapshot") or "").strip().upper() or None
+        ticker_status_snapshot = (
+            stored_ticker_status_snapshot
+            or ticker_status_map.get(str(entry.get("ticker", "UNKNOWN")).upper(), "LAB_ONLY")
+        )
+        y_directional = 1 if (realized_pnl or 0.0) > 0 else 0
+        y_take_profit = 1 if exit_reason == "TAKE_PROFIT" else 0
 
         feat = entry["classifier_features"]
         row: Dict[str, Any] = {
@@ -210,8 +254,14 @@ def accumulate(
             "entry_ts": entry.get("timestamp", ""),
             "action": entry.get("action", ""),
             "y_directional": y_directional,
+            "y_take_profit": y_take_profit,
+            "label_target": "take_profit",
             "label_source": "outcome_linked",
             "realized_pnl": realized_pnl,
+            "exit_reason": exit_reason,
+            "holding_period_at_exit": holding_period_at_exit,
+            "effective_horizon": effective_horizon,
+            "ticker_status_snapshot": ticker_status_snapshot,
         }
         for fname in _FEATURE_NAMES:
             row[fname] = feat.get(fname, float("nan"))

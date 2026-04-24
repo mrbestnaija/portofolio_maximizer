@@ -977,6 +977,39 @@ def _is_session_error(result: OpenClawResult) -> bool:
 # E.164 style phone number, e.g. +15551234567
 _E164_IN_TEXT_RE = re.compile(r"([+][0-9]{6,15})")
 _E164_EXACT_RE = re.compile(r"[+][0-9]{6,15}$")
+_TELEGRAM_HANDLE_RE = re.compile(r"^@[A-Za-z0-9_]{5,}$")
+_TELEGRAM_CHAT_ID_RE = re.compile(r"^[0-9]{5,}$")
+
+
+def is_valid_telegram_target(value: Any) -> bool:
+    """Return True when a target is usable for Telegram delivery."""
+    text = str(value or "").strip()
+    if not text:
+        return False
+    lower = text.lower()
+    if lower.startswith("whatsapp:") or lower.startswith("discord:"):
+        return False
+    if lower.startswith("telegram:"):
+        text = text.split(":", 1)[1].strip()
+    if not text or text.startswith("+"):
+        return False
+    return bool(_TELEGRAM_HANDLE_RE.fullmatch(text) or _TELEGRAM_CHAT_ID_RE.fullmatch(text))
+
+
+def canonicalize_telegram_target(value: Any) -> str:
+    """Normalize a Telegram target to the explicit `telegram:<target>` form."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    lower = text.lower()
+    if lower.startswith("telegram:"):
+        inner = text.split(":", 1)[1].strip()
+        if is_valid_telegram_target(inner):
+            return f"telegram:{inner}"
+        return text
+    if is_valid_telegram_target(text):
+        return f"telegram:{text}"
+    return text
 
 # Allowed channel prefixes for `channel:target` parsing.
 # Keep this in sync (loosely) with `openclaw agent --help` channel list.
@@ -1596,6 +1629,29 @@ def _resolve_listener_fallback_channel(current_channel: Optional[str] = None) ->
     return raw
 
 
+def _resolve_listener_fallback_target(current_target: str, fallback_channel: Optional[str] = None) -> str:
+    """Resolve the fallback delivery target, if one is explicitly configured."""
+    if str(fallback_channel or "").strip().lower() != "telegram":
+        return str(current_target or "").strip()
+    raw = str(os.getenv("OPENCLAW_LISTENER_FALLBACK_TO", "")).strip()
+    if raw and is_valid_telegram_target(raw):
+        return canonicalize_telegram_target(raw)
+    current = str(current_target or "").strip()
+    if is_valid_telegram_target(current):
+        return canonicalize_telegram_target(current)
+    return ""
+
+
+def _primary_notification_channel(channel: Optional[str], to: str) -> Optional[str]:
+    """Best-effort guess of the primary delivery channel for a notification."""
+    explicit = str(channel or "").strip().lower()
+    if explicit:
+        return explicit
+    if _E164_EXACT_RE.fullmatch(str(to or "").strip()):
+        return "whatsapp"
+    return None
+
+
 def _extract_agent_reply_text(raw: str) -> str:
     text = (raw or "").strip()
     if not text:
@@ -1690,6 +1746,10 @@ def send_message(
                 stderr="Rate limited: too many messages in short period. Wait and retry.",
             )
 
+    primary_channel = _primary_notification_channel(channel, to)
+    fallback_channel = _resolve_listener_fallback_channel(primary_channel)
+    primary_transport_unavailable = False
+
     # --- Pre-send health probe (fast-fail on dead connections) ---
     # Instead of waiting for the send to timeout on a dead WhatsApp connection,
     # do a quick status check and attempt recovery proactively.
@@ -1749,6 +1809,7 @@ def send_message(
                     auto_recover = str(
                         os.getenv("OPENCLAW_AUTO_RECOVER_LISTENER", "1")
                     ).strip().lower() not in {"0", "false", "no", "off"}
+                    recovered = False
                     if auto_recover:
                         recovered, _probe_reason = _maybe_recover_missing_whatsapp_listener(
                             command=command, cwd=cwd,
@@ -1760,9 +1821,15 @@ def send_message(
                                 )
                             else:
                                 logger.warning(
-                                    "Pre-send probe: WhatsApp listener not ready, recovery failed (%s)",
-                                    _probe_reason,
-                                )
+                                "Pre-send probe: WhatsApp listener not ready, recovery failed (%s)",
+                                _probe_reason,
+                            )
+                    if not recovered and primary_channel == "whatsapp":
+                        primary_transport_unavailable = True
+            elif primary_channel == "whatsapp":
+                # The status probe itself timed out or failed. Prefer the fallback
+                # channel immediately instead of waiting on a known-dead WhatsApp path.
+                primary_transport_unavailable = True
         except Exception:
             pass  # Probe is best-effort; don't block sends on probe failure.
 
@@ -1840,6 +1907,51 @@ def send_message(
                 stderr=stderr or f"OpenClaw command timed out after {timeout_seconds}s",
             )
 
+    if primary_transport_unavailable and fallback_channel and primary_channel == "whatsapp":
+        fallback_to = _resolve_listener_fallback_target(to, fallback_channel)
+        if not fallback_to:
+            return _finalize_result(
+                OpenClawResult(
+                    ok=False,
+                    returncode=124,
+                    command=last_result.command,
+                    stdout=last_result.stdout,
+                    stderr=(
+                        (last_result.stderr or "").strip()
+                        + "\n[PMX] Primary WhatsApp delivery failed; no valid Telegram fallback target configured."
+                    ).strip(),
+                ),
+                record_for_storm=True,
+            )
+        fallback_cmd = build_message_send_command(
+            command=command,
+            to=fallback_to,
+            message=message,
+            media=media,
+            channel=fallback_channel,
+            silent=silent,
+        )
+        if extra_args:
+            fallback_cmd.extend([str(arg) for arg in extra_args])
+
+        fallback_result = _try_send(fallback_cmd)
+        if fallback_result.ok:
+            _reset_dns_probe_failures()
+            return _finalize_result(
+                OpenClawResult(
+                    ok=True,
+                    returncode=0,
+                    command=fallback_result.command,
+                    stdout=fallback_result.stdout,
+                    stderr=(
+                        "[PMX] Pre-send probe marked WhatsApp unavailable; routed via fallback channel "
+                        f"{fallback_channel}."
+                    ),
+                ),
+                record_for_storm=True,
+            )
+        return _finalize_result(_append_operator_hints(fallback_result), record_for_storm=True)
+
     # --- Retry loop with exponential backoff ---
     last_result = _try_send(cmd)
     if last_result.ok:
@@ -1898,6 +2010,73 @@ def send_message(
             command=last_result.command,
             stdout=last_result.stdout,
             stderr="\n".join(line for line in note_lines if line).strip(),
+            )
+
+    primary_channel = _primary_notification_channel(channel, to)
+    fallback_channel = _resolve_listener_fallback_channel(primary_channel)
+    fallback_eligible = bool(
+        fallback_channel
+        and primary_channel == "whatsapp"
+        and (
+            _is_missing_listener_error(last_result)
+            or _is_whatsapp_dns_error(last_result)
+            or _is_session_error(last_result)
+            or _is_retryable_error(last_result)
+        )
+    )
+    if fallback_eligible:
+        fallback_to = _resolve_listener_fallback_target(to, fallback_channel)
+        if not fallback_to:
+            last_result = OpenClawResult(
+                ok=False,
+                returncode=last_result.returncode,
+                command=last_result.command,
+                stdout=last_result.stdout,
+                stderr=(
+                    (last_result.stderr or "").strip()
+                    + "\n[PMX] Primary WhatsApp delivery failed; no valid Telegram fallback target configured."
+                ).strip(),
+            )
+            return _finalize_result(_append_operator_hints(last_result), record_for_storm=True)
+        fallback_cmd = build_message_send_command(
+            command=command,
+            to=fallback_to,
+            message=message,
+            media=media,
+            channel=fallback_channel,
+            silent=silent,
+        )
+        if extra_args:
+            fallback_cmd.extend([str(arg) for arg in extra_args])
+
+        fallback_result = _try_send(fallback_cmd)
+        if fallback_result.ok:
+            _reset_dns_probe_failures()
+            return _finalize_result(
+                OpenClawResult(
+                    ok=True,
+                    returncode=0,
+                    command=fallback_result.command,
+                    stdout=fallback_result.stdout,
+                    stderr=(
+                        (last_result.stderr or "").strip()
+                        + "\n[PMX] Primary WhatsApp delivery failed; routed via fallback channel "
+                        f"{fallback_channel}."
+                    ).strip(),
+                ),
+                record_for_storm=True,
+            )
+        last_result = OpenClawResult(
+            ok=False,
+            returncode=fallback_result.returncode,
+            command=fallback_result.command,
+            stdout=fallback_result.stdout or last_result.stdout,
+            stderr=(
+                (last_result.stderr or "").strip()
+                + "\n[PMX] Primary WhatsApp delivery failed; fallback channel "
+                f"{fallback_channel} also failed."
+                + ("\n" + (fallback_result.stderr or "").strip() if (fallback_result.stderr or "").strip() else "")
+            ).strip(),
         )
 
     # --- Session error detection ---

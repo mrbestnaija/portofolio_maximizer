@@ -27,6 +27,7 @@ import time
 import os
 import shutil
 
+from .env_flags import is_synthetic_mode
 from .timestamp_utils import ensure_utc, utc_now
 
 try:
@@ -2612,7 +2613,7 @@ class DatabaseManager:
             "recorded_at": utc_now().isoformat(),
         }
         self.set_metadata("last_run_provenance", payload)
-        if (execution_mode or "").lower() == "synthetic" or (data_source or "").lower() == "synthetic":
+        if is_synthetic_mode(execution_mode=execution_mode, data_source=data_source):
             self.set_metadata("profitability_proof", "false")
             self.set_metadata("profitability_proof_reason", "synthetic_data")
 

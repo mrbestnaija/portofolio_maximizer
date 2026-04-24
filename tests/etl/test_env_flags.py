@@ -174,6 +174,10 @@ class TestIsSyntheticMode:
         with self._env(PMX_PREFERRED_DATA_SOURCE="synthetic"):
             assert is_synthetic_mode() is True
 
+    def test_data_source_argument_synthetic_is_real_signal(self):
+        with self._env():
+            assert is_synthetic_mode(data_source="synthetic") is True
+
     # --- priority: SYNTHETIC_ONLY wins over execution_mode arg --------------
 
     def test_synthetic_only_overrides_execution_mode_live(self):

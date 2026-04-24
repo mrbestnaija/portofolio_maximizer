@@ -78,6 +78,11 @@ def apply_eligibility_gates(
     payload: dict[str, Any] = {
         "generated_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "eligibility_path": str(eligibility_path),
+        "eligibility_window": (
+            eligibility.get("window")
+            if isinstance(eligibility, dict) and isinstance(eligibility.get("window"), dict)
+            else (eligibility.get("meta", {}).get("window") if isinstance(eligibility, dict) and isinstance(eligibility.get("meta"), dict) else {})
+        ),
         "status": "ERROR" if errors else ("WARN" if warnings else "PASS"),
         "gate_written": True,
         "healthy_tickers": healthy_tickers,

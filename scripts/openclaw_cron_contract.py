@@ -15,6 +15,23 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 AGENT_TURN_PAYLOAD_KIND = "agentTurn"
 DEFAULT_SESSION_TARGET = "isolated"
 LEGACY_WINDOWS_PYTHON_PATH_RE = re.compile(r"(?i)(?:\.\\)?simpleTrader_env[\\/]+Scripts[\\/]+python\.exe")
+TELEGRAM_CHAT_ID_RE = re.compile(r"^[0-9]{5,}$")
+TELEGRAM_HANDLE_RE = re.compile(r"^@[A-Za-z0-9_]{5,}$")
+
+
+def is_valid_telegram_target(value: Any) -> bool:
+    """Return True when a fallback target can be routed via Telegram."""
+    text = _coerce_text(value)
+    if not text:
+        return False
+    lower = text.lower()
+    if lower.startswith("whatsapp:") or lower.startswith("discord:"):
+        return False
+    if lower.startswith("telegram:"):
+        text = text.split(":", 1)[1].strip()
+    if not text or text.startswith("+"):
+        return False
+    return bool(TELEGRAM_CHAT_ID_RE.fullmatch(text) or TELEGRAM_HANDLE_RE.fullmatch(text))
 
 
 def _coerce_text(value: Any) -> str:
@@ -217,6 +234,7 @@ def summarize_cron_jobs(payload: Any) -> Dict[str, Any]:
         row for row, job in zip(rows, jobs) if isinstance(job, dict) and _contains_legacy_python_path(job)
     ]
     fallback_ready_jobs: List[Dict[str, Any]] = []
+    invalid_fallback_jobs: List[Dict[str, Any]] = []
     for index, job in enumerate(jobs):
         if not isinstance(job, dict):
             continue
@@ -225,24 +243,40 @@ def summarize_cron_jobs(payload: Any) -> Dict[str, Any]:
         fallback = delivery_obj.get("fallback") if isinstance(delivery_obj, dict) else {}
         if not isinstance(fallback, dict):
             continue
-        fallback_channel = _coerce_text(fallback.get("channel"))
+        fallback_channel = _coerce_text(fallback.get("channel")).lower()
         if not fallback_channel:
             continue
-        fallback_ready_jobs.append(
-            {
-                "index": index,
-                "name": _coerce_text(job.get("name")) or None,
-                "id": _coerce_text(job.get("id")) or None,
-                "delivery_channel": _coerce_text(delivery_obj.get("channel")) or None,
-                "fallback_channel": fallback_channel,
-            }
-        )
+        fallback_target = _coerce_text(fallback.get("to"))
+        if fallback_channel == "telegram" and is_valid_telegram_target(fallback_target):
+            fallback_ready_jobs.append(
+                {
+                    "index": index,
+                    "name": _coerce_text(job.get("name")) or None,
+                    "id": _coerce_text(job.get("id")) or None,
+                    "delivery_channel": _coerce_text(delivery_obj.get("channel")) or None,
+                    "fallback_channel": fallback_channel,
+                    "fallback_target_valid": True,
+                }
+            )
+        elif fallback_channel == "telegram":
+            invalid_fallback_jobs.append(
+                {
+                    "index": index,
+                    "name": _coerce_text(job.get("name")) or None,
+                    "id": _coerce_text(job.get("id")) or None,
+                    "delivery_channel": _coerce_text(delivery_obj.get("channel")) or None,
+                    "fallback_channel": fallback_channel,
+                    "fallback_target_valid": False,
+                }
+            )
 
-    status = "FAIL" if invalid_jobs else ("WARN" if malformed_jobs else "OK")
+    status = "FAIL" if invalid_jobs else ("WARN" if malformed_jobs or invalid_fallback_jobs else "OK")
     detail = (
         f"{len(rows)} jobs, {len(agent_turn_rows)} agentTurn, "
-        f"{len(invalid_jobs)} malformed, {len(fallback_ready_jobs)} fallback-ready"
+        f"{len(invalid_jobs)} malformed, {len(fallback_ready_jobs)} valid fallback-ready"
     )
+    if invalid_fallback_jobs:
+        detail += f", {len(invalid_fallback_jobs)} invalid telegram fallback targets"
     return {
         "status": status,
         "detail": detail,
@@ -255,9 +289,11 @@ def summarize_cron_jobs(payload: Any) -> Dict[str, Any]:
         "malformed_job_count": len(malformed_jobs),
         "stale_python_path_count": len(stale_python_path_jobs),
         "delivery_fallback_ready_count": len(fallback_ready_jobs),
+        "delivery_fallback_invalid_count": len(invalid_fallback_jobs),
         "job_rows": rows,
         "invalid_jobs": invalid_jobs,
         "fallback_ready_jobs": fallback_ready_jobs,
+        "invalid_fallback_jobs": invalid_fallback_jobs,
     }
 
 

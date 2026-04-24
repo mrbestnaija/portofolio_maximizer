@@ -50,6 +50,7 @@ from etl.data_validator import DataValidator
 from etl.data_storage import DataStorage
 from etl.preprocessor import Preprocessor
 from etl.time_series_forecaster import TimeSeriesForecaster, TimeSeriesForecasterConfig
+from scripts.compute_ticker_eligibility import compute_eligibility
 from execution.paper_trading_engine import PaperTradingEngine
 from models.signal_router import SignalRouter, validate_routing_contract
 from etl.data_universe import resolve_ticker_universe
@@ -360,6 +361,7 @@ def _build_semantic_admission(
         signal_context.get("admission_override_reason_codes"),
         fallback_reason_code=signal_context.get("admission_override_reason_code"),
     )
+    quarantined = bool(signal_context.get("quarantined"))
     missing_execution_metadata_fields: list[str] = []
 
     reason_codes: list[str] = []
@@ -388,9 +390,11 @@ def _build_semantic_admission(
         reason_codes.append("ROUTING_AMBIGUOUS")
     if not production_labeled:
         reason_codes.append("NOT_PRODUCTION_LABELED")
+    if quarantined:
+        reason_codes.append("QUARANTINED")
 
     admissible = len(reason_codes) == 0
-    bucket = "ELIGIBLE" if admissible else "ACCEPTED_NONELIGIBLE"
+    bucket = "QUARANTINED" if quarantined else "ELIGIBLE" if admissible else "ACCEPTED_NONELIGIBLE"
     return {
         "admission_contract_version": 1,
         "accepted_for_audit_history": True,
@@ -400,8 +404,8 @@ def _build_semantic_admission(
         "reason_code": "READY" if admissible else ",".join(reason_codes),
         "reason_codes": [] if admissible else list(reason_codes),
         "production_labeled": production_labeled,
-        "not_quarantined": True,
-        "quarantined": False,
+        "not_quarantined": not quarantined,
+        "quarantined": quarantined,
         "superseded": False,
         "duplicate_conflict": False,
         "missing_execution_metadata": bool(missing_execution_metadata_fields),
@@ -2138,6 +2142,12 @@ def _build_routed_signal_snapshot(
         "signal_timestamp": payload.get("signal_timestamp") or signal.get("signal_timestamp"),
         "bar_timestamp": payload.get("bar_timestamp"),
         "forecast_horizon": payload.get("forecast_horizon") or signal.get("forecast_horizon"),
+        "effective_horizon": payload.get("effective_horizon") or signal.get("effective_horizon"),
+        "max_holding_days_override": payload.get("max_holding_days_override") or signal.get("max_holding_days_override"),
+        "entry_price": payload.get("entry_price") or signal.get("entry_price"),
+        "entry_atr": payload.get("entry_atr") or signal.get("entry_atr"),
+        "stop_loss": payload.get("stop_loss") or signal.get("stop_loss"),
+        "target_price": payload.get("target_price") or signal.get("target_price"),
         "hold_reason": hold_reason,
         "routing_reason": routing_reason,
         "snr": snr,
@@ -2158,6 +2168,7 @@ def _build_routed_signal_snapshot(
         "barbell_strategy_style": payload.get("barbell_strategy_style"),
         "barbell_rebalance_frequency_bars": payload.get("barbell_rebalance_frequency_bars"),
         "barbell_diagnostics": payload.get("barbell_diagnostics"),
+        "ticker_status_snapshot": payload.get("ticker_status_snapshot") or signal.get("ticker_status_snapshot"),
     }
     if quant_summary:
         snapshot["quant_validation"] = quant_summary
@@ -2336,6 +2347,16 @@ def _attach_signal_context_to_forecast_audit(
             "execution_policy_blocked",
             "admission_override_reason_code",
             "admission_override_reason_codes",
+            "quarantined",
+            "cycle_status",
+            "quarantine_reason",
+            "entry_price",
+            "entry_atr",
+            "effective_horizon",
+            "ticker_status_snapshot",
+            "max_holding_days_override",
+            "stop_loss",
+            "target_price",
             "expected_return",
             "expected_return_net",
             "gross_trade_return",
@@ -2405,6 +2426,9 @@ def _attach_signal_context_to_forecast_audit(
         payload["execution_decision"] = {
             "executed": bool(execution_report.get("executed")),
             "execution_policy_blocked": bool(merged.get("execution_policy_blocked")),
+            "quarantined": bool(merged.get("quarantined")),
+            "cycle_status": merged.get("cycle_status"),
+            "quarantine_reason": merged.get("quarantine_reason"),
             "execution_mode": merged.get("execution_mode"),
             "status": str(execution_report.get("status") or ""),
             "reason": str(execution_report.get("reason") or ""),
@@ -2610,6 +2634,9 @@ def _execute_signal(
     proof_mode: bool = False,
     is_intraday: bool = False,
     max_open_lots_per_ticker: Optional[int] = None,
+    ticker_status_snapshot: Optional[str] = None,
+    quarantine_new_buys: bool = False,
+    quarantine_reason: Optional[str] = None,
 ) -> Optional[Dict]:
     """Route signals and push the primary decision through the execution engine."""
     bundle = router.route_signal(
@@ -2796,6 +2823,40 @@ def _execute_signal(
             primary_payload.get("stop_loss"), primary_payload.get("target_price"),
         )
 
+    entry_atr_value = None
+    try:
+        if isinstance(market_data, pd.DataFrame) and len(market_data) >= 14 and {"High", "Low"}.issubset(set(market_data.columns)):
+            atr_series = (pd.to_numeric(market_data["High"], errors="coerce") - pd.to_numeric(market_data["Low"], errors="coerce")).rolling(14).mean()
+            atr_val = atr_series.iloc[-1]
+            if pd.notna(atr_val) and float(atr_val) > 0:
+                entry_atr_value = float(atr_val)
+    except Exception:
+        entry_atr_value = None
+    if entry_atr_value is not None:
+        primary_payload["entry_atr"] = entry_atr_value
+
+    effective_horizon_value = None
+    try:
+        horizon_candidate = primary_payload.get("forecast_horizon")
+        if horizon_candidate is not None:
+            horizon_candidate_i = int(horizon_candidate)
+            if horizon_candidate_i > 0:
+                cap = int(os.getenv("MAX_HOLDING_DAYS_CAP", "10"))
+                max_hold_override = primary_payload.get("max_holding_days_override")
+                if max_hold_override is not None:
+                    try:
+                        cap = max(cap, int(max_hold_override))
+                    except (TypeError, ValueError):
+                        pass
+                effective_horizon_value = min(horizon_candidate_i, cap)
+    except Exception:
+        effective_horizon_value = None
+    if effective_horizon_value is not None:
+        primary_payload["effective_horizon"] = effective_horizon_value
+    if ticker_status_snapshot not in (None, "", [], {}):
+        primary_payload["ticker_status_snapshot"] = ticker_status_snapshot
+    primary_payload["entry_price"] = current_price
+
     signal_snapshot = _build_routed_signal_snapshot(
         ticker=ticker,
         primary_signal=primary,
@@ -2815,6 +2876,67 @@ def _execute_signal(
         if isinstance(signal_snapshot.get("quant_validation"), dict)
         else {}
     )
+
+    cycle_status = "QUARANTINED" if quarantine_new_buys else "ACTIVE"
+
+    # Quarantine only suppresses new BUY routing. Close-side / defensive exits still flow
+    # so existing positions can continue to count toward realized evidence.
+    if quarantine_new_buys and str(routed_action).upper() == "BUY":
+        quarantine_codes = ["QUARANTINED"]
+        quarantine_detail = quarantine_reason or "Eligibility snapshot unavailable; suppressing new BUY routing."
+        logger.warning(
+            "[QUARANTINE] %s: BUY suppressed because cycle is quarantined (%s)",
+            ticker,
+            quarantine_detail,
+        )
+        return {
+            "status": "REJECTED",
+            "reason": quarantine_detail,
+            "executed": False,
+            "execution_mode": execution_mode,
+            "execution_policy_blocked": True,
+            "admission_override_reason_codes": quarantine_codes,
+            "execution_policy_detail": quarantine_detail,
+            "execution_policy_reason_codes": quarantine_codes,
+            "evidence_source_classification": "producer-native",
+            "signal_id": primary_payload.get("signal_id"),
+            "ts_signal_id": primary_payload.get("ts_signal_id"),
+            "ticker": ticker,
+            "action": routed_action,
+            "routed_action": routed_action,
+            "executed_action": None,
+            "execution_override_type": None,
+            "forced_exit": False,
+            "exit_reason": None,
+            "signal_source": primary.get("source", "TIME_SERIES"),
+            "signal_confidence": signal_snapshot.get("confidence"),
+            "confidence_calibrated": signal_snapshot.get("confidence_calibrated"),
+            "expected_return": signal_snapshot.get("expected_return"),
+            "expected_return_net": signal_snapshot.get("expected_return_net"),
+            "gross_trade_return": signal_snapshot.get("gross_trade_return"),
+            "net_trade_return": signal_snapshot.get("net_trade_return"),
+            "roundtrip_cost_fraction": signal_snapshot.get("roundtrip_cost_fraction"),
+            "roundtrip_cost_bps": signal_snapshot.get("roundtrip_cost_bps"),
+            "routing_reason": routing_reason,
+            "hold_reason": routing_hold_reason,
+            "snr": routing_snr,
+            "directional_gate_applied": signal_snapshot.get("directional_gate_applied"),
+            "quant_validation_status": quant_validation_summary.get("status"),
+            "quant_validation_failed_criteria": quant_validation_summary.get("failed_criteria"),
+            "signal_timestamp": primary_payload.get("signal_timestamp"),
+            "bar_timestamp": primary_payload.get("bar_timestamp"),
+            "entry_price": primary_payload.get("entry_price"),
+            "entry_atr": primary_payload.get("entry_atr"),
+            "effective_horizon": primary_payload.get("effective_horizon"),
+            "ticker_status_snapshot": primary_payload.get("ticker_status_snapshot"),
+            "max_holding_days_override": primary_payload.get("max_holding_days_override"),
+            "stop_loss": primary_payload.get("stop_loss"),
+            "target_price": primary_payload.get("target_price"),
+            "signal_snapshot": signal_snapshot,
+            "quarantined": True,
+            "cycle_status": cycle_status,
+            "quarantine_reason": quarantine_detail,
+        }
 
     # Execution policy pre-order block: signal rejected before reaching trading engine.
     if primary_payload.get("execution_policy_blocked"):
@@ -2859,7 +2981,17 @@ def _execute_signal(
             "quant_validation_failed_criteria": quant_validation_summary.get("failed_criteria"),
             "signal_timestamp": primary_payload.get("signal_timestamp"),
             "bar_timestamp": primary_payload.get("bar_timestamp"),
+            "entry_price": primary_payload.get("entry_price"),
+            "entry_atr": primary_payload.get("entry_atr"),
+            "effective_horizon": primary_payload.get("effective_horizon"),
+            "ticker_status_snapshot": primary_payload.get("ticker_status_snapshot"),
+            "max_holding_days_override": primary_payload.get("max_holding_days_override"),
+            "stop_loss": primary_payload.get("stop_loss"),
+            "target_price": primary_payload.get("target_price"),
             "signal_snapshot": signal_snapshot,
+            "quarantined": False,
+            "cycle_status": cycle_status,
+            "quarantine_reason": None,
         }
 
     result = trading_engine.execute_signal(
@@ -2907,6 +3039,13 @@ def _execute_signal(
             "quant_validation_failed_criteria": quant_validation_summary.get("failed_criteria"),
             "signal_timestamp": primary_payload.get("signal_timestamp"),
             "bar_timestamp": primary_payload.get("bar_timestamp"),
+            "entry_price": primary_payload.get("entry_price"),
+            "entry_atr": primary_payload.get("entry_atr"),
+            "effective_horizon": primary_payload.get("effective_horizon"),
+            "ticker_status_snapshot": primary_payload.get("ticker_status_snapshot"),
+            "max_holding_days_override": primary_payload.get("max_holding_days_override"),
+            "stop_loss": primary_payload.get("stop_loss"),
+            "target_price": primary_payload.get("target_price"),
             "warnings": result.validation_warnings,
             "quality": quality,
             "data_source": data_source,
@@ -2914,6 +3053,9 @@ def _execute_signal(
             "barbell_bucket": primary_payload.get("barbell_bucket"),
             "barbell_multiplier": primary_payload.get("barbell_multiplier"),
             "signal_snapshot": signal_snapshot,
+            "quarantined": bool(quarantine_new_buys),
+            "cycle_status": cycle_status,
+            "quarantine_reason": quarantine_reason,
         }
 
     realized_pnl = getattr(result.trade, "realized_pnl", None)
@@ -2969,6 +3111,12 @@ def _execute_signal(
         "evidence_eligible_for_gate": evidence_eligible_for_gate,
         "evidence_exclusion_reason": evidence_exclusion_reason,
         "entry_price": entry_price,
+        "entry_atr": primary_payload.get("entry_atr"),
+        "effective_horizon": primary_payload.get("effective_horizon"),
+        "ticker_status_snapshot": primary_payload.get("ticker_status_snapshot"),
+        "max_holding_days_override": primary_payload.get("max_holding_days_override"),
+        "stop_loss": primary_payload.get("stop_loss"),
+        "target_price": primary_payload.get("target_price"),
         "portfolio_value": result.portfolio.total_value if result.portfolio else None,
         "signal_source": primary.get("source", "TIME_SERIES"),
         "signal_confidence": signal_snapshot.get("confidence"),
@@ -2999,6 +3147,9 @@ def _execute_signal(
         "mid_price": mid_px,
         "mid_slippage_bp": mid_slippage_bp,
         "signal_snapshot": signal_snapshot,
+        "quarantined": bool(quarantine_new_buys),
+        "cycle_status": cycle_status,
+        "quarantine_reason": quarantine_reason,
     }
 
 
@@ -3079,6 +3230,7 @@ def _emit_dashboard_json(
     forecaster_health: Optional[Dict[str, Any]] = None,
     quant_validation_health: Optional[Dict[str, Any]] = None,
     orchestration_health: Optional[Dict[str, Any]] = None,
+    runtime_status: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Persist the latest auto-trader producer snapshot for the dashboard bridge."""
     def _json_safe(obj: Any) -> Any:
@@ -3096,6 +3248,7 @@ def _emit_dashboard_json(
         "quant_validation_health": quant_validation_health or {},
         "orchestration_health": orchestration_health or {},
         "preprocess_health": preprocess_health or {},
+        "runtime_status": runtime_status or {},
         "routing": {
             "ts_signals": routing_stats.get("time_series_signals", 0),
             "llm_signals": routing_stats.get("llm_fallback_signals", 0),
@@ -3718,6 +3871,8 @@ def main(
 
     orchestration_health_records: list[Dict[str, Any]] = []
     preprocess_health_records: list[Dict[str, Any]] = []
+    eligibility_snapshot_statuses: list[str] = []
+    quarantined_cycle_count = 0
     for cycle in range(1, cycles + 1):
         logger.info("=== Trading Cycle %s/%s ===", cycle, cycles)
         try:
@@ -3754,6 +3909,28 @@ def main(
         last_dataset_id = window_dataset_id or last_dataset_id
         last_generator_version = window_generator_version or last_generator_version
         last_execution_mode = effective_execution_mode
+        ticker_status_snapshot_map: Dict[str, str] = {}
+        eligibility_snapshot_status = "READY"
+        quarantine_new_buys = False
+        quarantine_reason = None
+        try:
+            eligibility_snapshot = compute_eligibility(db_path=trading_engine.db_manager.db_path)
+            ticker_status_snapshot_map = {
+                str(ticker_key).strip().upper(): str(info.get("status") or "LAB_ONLY").strip().upper()
+                for ticker_key, info in (eligibility_snapshot.get("tickers") or {}).items()
+                if str(ticker_key or "").strip()
+            }
+        except Exception:
+            eligibility_snapshot_status = "QUARANTINED"
+            quarantine_new_buys = True
+            quarantine_reason = "Eligibility snapshot computation failed; suppressing new BUY routing."
+            logger.warning(
+                "Failed to compute ticker status snapshot for this cycle; quarantining new BUY routing.",
+                exc_info=True,
+            )
+        eligibility_snapshot_statuses.append(eligibility_snapshot_status)
+        if eligibility_snapshot_status == "QUARANTINED":
+            quarantined_cycle_count += 1
         if cycle == 1:
             try:
                 trading_engine.db_manager.record_run_provenance(
@@ -4044,6 +4221,9 @@ def main(
                 proof_mode=proof_mode,
                 is_intraday=interval is not None and interval != "1d",
                 max_open_lots_per_ticker=max_open_lots_per_ticker,
+                ticker_status_snapshot=ticker_status_snapshot_map.get(symbol),
+                quarantine_new_buys=quarantine_new_buys,
+                quarantine_reason=quarantine_reason,
             )
 
             if execution_report:
@@ -4432,6 +4612,17 @@ def main(
     except Exception:
         trade_events = []
 
+    runtime_status_record = {
+        "eligibility_snapshot_status": "QUARANTINED"
+        if quarantined_cycle_count > 0
+        else "READY",
+        "eligibility_snapshot_statuses": eligibility_snapshot_statuses,
+        "quarantined_cycle_count": quarantined_cycle_count,
+        "quarantine_reason": (
+            "eligibility_snapshot_compute_failed" if quarantined_cycle_count > 0 else None
+        ),
+    }
+
     _emit_dashboard_json(
         path=RUN_AUTO_TRADER_ARTIFACT_PATH,
         meta=meta,
@@ -4449,6 +4640,7 @@ def main(
         forecaster_health=forecaster_health,
         quant_validation_health=quant_health,
         orchestration_health=orchestration_health,
+        runtime_status=runtime_status_record,
     )
     _emit_dashboard_png(
         path=ROOT_PATH / "visualizations" / "dashboard_snapshot.png",
@@ -4512,6 +4704,7 @@ def main(
         },
         "orchestration": orchestration_health,
         "quant_validation": quant_health,
+        "runtime_status": runtime_status_record,
         "next_actions": action_plan,
     }
     _log_run_summary(run_summary_record)

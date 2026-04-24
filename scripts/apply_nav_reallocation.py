@@ -158,6 +158,8 @@ def apply_reallocation(
     plan: Dict,
     current_config: Dict,
     constraints: AllocationConstraints,
+    *,
+    revert: bool = False,
 ) -> AllocationArtifact:
     """Apply the promotion/demotion plan subject to barbell constraints.
 
@@ -176,8 +178,10 @@ def apply_reallocation(
 
     promotions = plan.get("promotions") or []
     demotions = plan.get("demotions") or []
+    if revert:
+        promotions, demotions = demotions, promotions
     rollout = plan.get("_rollout") if isinstance(plan.get("_rollout"), dict) else {}
-    live_apply_allowed = bool(rollout.get("live_apply_allowed", True))
+    live_apply_allowed = bool(rollout.get("live_apply_allowed", True)) or revert
 
     applied_promotions: List[Dict] = []
     applied_demotions: List[Dict] = []
@@ -197,6 +201,13 @@ def apply_reallocation(
         if not ticker:
             continue
         eg = _check_evidence_gate(ticker, plan_rows.get(ticker), constraints)
+        if revert:
+            eg = {
+                **eg,
+                "passed": True,
+                "blocking_reasons": [],
+                "evidence_class": f"{eg.get('evidence_class') or 'UNKNOWN'}_ROLLBACK",
+            }
         if not live_apply_allowed:
             eg = {
                 **eg,
@@ -220,6 +231,13 @@ def apply_reallocation(
         if not ticker:
             continue
         eg = _check_evidence_gate(ticker, plan_rows.get(ticker), constraints)
+        if revert:
+            eg = {
+                **eg,
+                "passed": True,
+                "blocking_reasons": [],
+                "evidence_class": f"{eg.get('evidence_class') or 'UNKNOWN'}_ROLLBACK",
+            }
         evidence_gate.setdefault(ticker, eg)
         if ticker in core_syms and ticker not in spec_syms:
             core_syms.remove(ticker)
@@ -252,8 +270,9 @@ def apply_reallocation(
 
     n_applied = len(applied_promotions) + len(applied_demotions)
     n_skipped = len(skipped_moves)
+    mode = "rollback" if revert else "apply"
     summary = (
-        f"{n_applied} moves applied ({len(applied_promotions)} promotions, "
+        f"{mode}: {n_applied} moves applied ({len(applied_promotions)} promotions, "
         f"{len(applied_demotions)} demotions), {n_skipped} skipped by evidence gate or constraints"
     )
 
@@ -402,6 +421,7 @@ def _load_and_normalize_plan(plan_path: str) -> Dict:
 @click.option("--core-max-weight", default=CORE_MAX_WEIGHT, show_default=True)
 @click.option("--spec-max-weight", default=SPEC_MAX_WEIGHT, show_default=True)
 @click.option("--min-coverage-ratio", default=0.30, show_default=True)
+@click.option("--revert", is_flag=True, default=False, help="Reverse the plan moves for rollback.")
 def main(
     plan_path: str,
     config_path: str,
@@ -411,6 +431,7 @@ def main(
     core_max_weight: float,
     spec_max_weight: float,
     min_coverage_ratio: float,
+    revert: bool,
 ) -> None:
     plan = _load_and_normalize_plan(plan_path)
 
@@ -423,7 +444,7 @@ def main(
         min_coverage_ratio=min_coverage_ratio,
     )
 
-    artifact = apply_reallocation(plan, current_config, constraints)
+    artifact = apply_reallocation(plan, current_config, constraints, revert=revert)
 
     out_path = Path(output)
     out_path.parent.mkdir(parents=True, exist_ok=True)

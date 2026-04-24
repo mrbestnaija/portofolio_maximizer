@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 Local-only OpenClaw production-readiness snapshot for Portfolio Maximizer.
 

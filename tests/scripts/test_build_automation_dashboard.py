@@ -73,15 +73,47 @@ def test_dashboard_snapshot_includes_canonical_snapshot(tmp_path: Path, monkeypa
     _write_json(
         canonical_path,
         {
-            "schema_version": 2,
+            "schema_version": 4,
+            "gate": {
+                "freshness_status": {"status": "fresh", "age_minutes": 15.0, "expected_max_age_minutes": 1440.0},
+                "warmup_state": {"posture": "expired", "deadline_utc": "2026-04-24T20:00:00Z", "matched_needed": 0},
+                "trajectory_alarm": {"active": False},
+            },
             "summary": {
                 "ann_roi_pct": 9.86,
+                "roi_ann_pct": 9.86,
+                "deployment_pct": 1.83,
+                "objective_score": 18.05,
+                "objective_valid": True,
                 "ngn_hurdle_pct": 28.0,
                 "gap_to_hurdle_pp": 18.14,
                 "unattended_gate": "FAIL",
                 "unattended_ready": False,
+                "evidence_health": "clean",
             },
+            "alpha_objective": {
+                "roi_ann_pct": 9.86,
+                "deployment_pct": 1.83,
+                "objective_score": 18.05,
+                "objective_valid": True,
+            },
+            "alpha_model_quality": {
+                "status": "available",
+                "target_amplitude_hit_rate": 0.75,
+                "target_amplitude_hit_rate_rolling_20": 0.80,
+                "target_amplitude_hit_count": 8,
+                "target_amplitude_support": 8,
+                "domain_objective_version": "v1.0.0",
+            },
+            "thin_linkage": {"matched_current": 10, "matched_needed": 0},
             "source_contract": {
+                "status": "clean",
+                "canonical_sources": [
+                    {"metric": "closed_pnl", "source_file": "production_closed_trades", "query_or_key": "production_closed_trades"}
+                ],
+                "allowlisted_readers": ["scripts/build_automation_dashboard.py"],
+                "violations_found": [],
+                "scan_timestamp_utc": "2026-04-18T12:00:00Z",
                 "canonical": {"closed_pnl": "production_closed_trades"},
                 "ui_only": {"metrics_summary": "visualizations/performance/metrics_summary.json"},
             },
@@ -103,5 +135,8 @@ def test_dashboard_snapshot_includes_canonical_snapshot(tmp_path: Path, monkeypa
 
     assert result.exit_code == 0, result.output
     payload = json.loads((tmp_path / "visualizations" / "dashboard_automation.json").read_text(encoding="utf-8"))
-    assert payload["inputs"]["canonical_snapshot"]["schema_version"] == 2
+    assert payload["inputs"]["canonical_snapshot"]["schema_version"] == 4
     assert payload["inputs"]["canonical_snapshot"]["summary"]["ann_roi_pct"] == pytest.approx(9.86)
+    assert payload["inputs"]["canonical_snapshot"]["alpha_model_quality"]["status"] == "available"
+    assert payload["inputs"]["canonical_snapshot_contract"]["ok"] is True
+    assert payload["inputs"]["canonical_snapshot_contract"]["alpha_model_quality_status"] == "available"

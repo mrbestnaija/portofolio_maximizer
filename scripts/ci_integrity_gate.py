@@ -17,11 +17,13 @@ Exit codes:
 
 import os
 import sys
+from pathlib import Path
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 from integrity.pnl_integrity_enforcer import PnLIntegrityEnforcer
+from scripts.source_contract_guard import run_source_contract_guard
 
 # Phase 7.13-C1: central path constants
 try:
@@ -54,6 +56,17 @@ def main():
         ),
     )
     args = parser.parse_args()
+
+    guard_report = run_source_contract_guard(Path(ROOT))
+    if not guard_report.get("ok", False):
+        print("=== Source Contract Guard ===")
+        for violation in guard_report.get("violations", []):
+            print(
+                f"[FAIL] [{violation.get('kind')}] "
+                f"{violation.get('file')}:{violation.get('line')} "
+                f"{violation.get('detail')}"
+            )
+        sys.exit(1)
 
     if not os.path.exists(args.db):
         print(f"[SKIP] Database not found: {args.db}")

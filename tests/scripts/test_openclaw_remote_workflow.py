@@ -205,6 +205,119 @@ def test_check_channels_uses_recent_maintenance_snapshot_as_recovering_context()
     assert result["fallback_ready"] == ["telegram"]
 
 
+def test_load_channels_status_context_prefers_recent_maintenance_snapshot() -> None:
+    maintenance = {
+        "timestamp_utc": "2099-01-01T00:00:00+00:00",
+        "steps": {
+            "channels_status_snapshot": {
+                "channels": {
+                    "whatsapp": {
+                        "configured": True,
+                        "linked": True,
+                        "running": True,
+                        "connected": True,
+                    }
+                }
+            }
+        },
+    }
+
+    original_live = workflow._load_live_channels_status
+    original_recent = workflow._load_recent_maintenance_payload
+    workflow._load_live_channels_status = lambda timeout=20.0: (_ for _ in ()).throw(AssertionError("live probe should not run"))
+    workflow._load_recent_maintenance_payload = lambda: (maintenance, 1.0)
+    try:
+        result = workflow._load_channels_status_context()
+    finally:
+        workflow._load_live_channels_status = original_live
+        workflow._load_recent_maintenance_payload = original_recent
+
+    assert result["source"] == "maintenance_snapshot"
+    assert result["parsed"] is True
+    assert result["timeout"] is False
+    assert result["elapsed_ms"] == 0
+    assert result["payload"]["channels"]["whatsapp"]["connected"] is True
+
+
+def test_load_channels_status_context_uses_recent_maintenance_report_without_live_probe() -> None:
+    maintenance = {
+        "timestamp_utc": "2099-01-01T00:00:00+00:00",
+        "steps": {
+            "gateway_health": {
+                "rpc_ok": True,
+                "service_status": "running",
+                "primary_channel_issue_final": None,
+                "warnings": [],
+            }
+        },
+    }
+
+    original_live = workflow._load_live_channels_status
+    original_recent = workflow._load_recent_maintenance_payload
+    workflow._load_live_channels_status = lambda timeout=20.0: (_ for _ in ()).throw(AssertionError("live probe should not run"))
+    workflow._load_recent_maintenance_payload = lambda: (maintenance, 1.0)
+    try:
+        result = workflow._load_channels_status_context()
+    finally:
+        workflow._load_live_channels_status = original_live
+        workflow._load_recent_maintenance_payload = original_recent
+
+    assert result["source"] == "maintenance_report"
+    assert result["parsed"] is False
+    assert result["timeout"] is False
+    assert result["elapsed_ms"] == 0
+    assert result["payload"] is None
+
+
+def test_load_channels_status_context_uses_recent_maintenance_state_snapshot_without_live_probe() -> None:
+    maintenance = {
+        "timestamp_utc": "2099-01-01T00:00:00+00:00",
+        "steps": {
+            "gateway_health": {
+                "rpc_ok": True,
+                "service_status": "running",
+                "primary_channel_issue_final": None,
+                "warnings": [],
+            }
+        },
+    }
+    state = {
+        "updated_at_utc": "2099-01-01T00:00:00+00:00",
+        "last_channels_status_snapshot": {
+            "timestamp_utc": "2099-01-01T00:00:00+00:00",
+            "timestamp_ms": 123456,
+            "channels": {
+                "whatsapp": {
+                    "configured": True,
+                    "linked": True,
+                    "running": True,
+                    "connected": True,
+                }
+            },
+            "source": "probe",
+        },
+    }
+
+    original_live = workflow._load_live_channels_status
+    original_recent = workflow._load_recent_maintenance_payload
+    original_state = workflow._load_recent_maintenance_state
+    workflow._load_live_channels_status = lambda timeout=20.0: (_ for _ in ()).throw(AssertionError("live probe should not run"))
+    workflow._load_recent_maintenance_payload = lambda: (maintenance, 1.0)
+    workflow._load_recent_maintenance_state = lambda: (state, 1.0)
+    try:
+        result = workflow._load_channels_status_context()
+    finally:
+        workflow._load_live_channels_status = original_live
+        workflow._load_recent_maintenance_payload = original_recent
+        workflow._load_recent_maintenance_state = original_state
+
+    assert result["source"] == "maintenance_state_snapshot"
+    assert result["parsed"] is True
+    assert result["timeout"] is False
+    assert result["elapsed_ms"] == 0
+    assert result["payload"]["channels"]["whatsapp"]["connected"] is True
+
+
 def test_channel_test_uses_inferred_whatsapp_target_and_send_helper() -> None:
     calls: list[tuple[str, str, str]] = []
 
@@ -272,7 +385,7 @@ def test_cron_health_reports_missing_session_target_without_crashing(tmp_path: P
                             "kind": "agentTurn",
                             "message": "ok",
                         },
-                        "delivery": {"channel": "whatsapp", "fallback": {"channel": "telegram", "to": "+2347"}},
+                        "delivery": {"channel": "whatsapp", "fallback": {"channel": "telegram", "to": "telegram:6515478488"}},
                         "state": {"consecutiveErrors": 0, "lastStatus": "success"},
                     },
                 ]
@@ -320,7 +433,7 @@ def test_cron_health_surfaces_warn_rows_in_validation_output(tmp_path: Path, mon
                             "kind": "agentTurn",
                             "message": "ok",
                         },
-                        "delivery": {"channel": "whatsapp", "fallback": {"channel": "telegram", "to": "+2347"}},
+                        "delivery": {"channel": "whatsapp", "fallback": {"channel": "telegram", "to": "telegram:6515478488"}},
                         "state": {"consecutiveErrors": 0, "lastStatus": "success"},
                     },
                 ]
@@ -392,7 +505,7 @@ def test_cron_health_surfaces_stale_python_path_count(tmp_path: Path, monkeypatc
                             "kind": "agentTurn",
                             "message": ".\\simpleTrader_env\\Scripts\\python.exe scripts\\check_classifier_readiness.py --json",
                         },
-                        "delivery": {"channel": "whatsapp", "fallback": {"channel": "telegram", "to": "+2347"}},
+                        "delivery": {"channel": "whatsapp", "fallback": {"channel": "telegram", "to": "telegram:6515478488"}},
                         "state": {"consecutiveErrors": 0, "lastStatus": "pending"},
                     }
                 ]
