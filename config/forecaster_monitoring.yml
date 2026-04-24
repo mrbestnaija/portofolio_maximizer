@@ -62,11 +62,10 @@ forecaster_monitoring:
     # enough effective audits with RMSE values. Until then, checks are
     # considered inconclusive (non-failing).
     # Raised from 20 to 30 (2026-03-26): effective_n just crossed 20 with a 50%
-    # violation rate dominated by pre-Phase-10 (SARIMAX-disabled) audits. Need
-    # ~10 more post-Phase-10 SARIMAX-enabled audits to establish a meaningful
-    # baseline. Revert to 20 once violation rate naturally drops below 35% for
-    # 20+ consecutive post-Phase-10 audit windows.
-    holding_period_audits: 30
+    # violation rate dominated by pre-Phase-10 (SARIMAX-disabled) audits.
+    # 2026-04-19: Reverted to 20. Condition met: violation_rate=31.43% < 35%
+    # over 35 post-Phase-10 audit windows.
+    holding_period_audits: 20
     # Minimum lift required to "promote" the ensemble as default after holding
     # period is met (e.g., require >=2% RMSE improvement).
     promotion_margin: 0.02
@@ -79,11 +78,12 @@ forecaster_monitoring:
     # ensemble is already blocked at forecast-time by strict_preselection_gate
     # (max_rmse_ratio=1.0). Warmup violations add no marginal safety and cause
     # check_model_improvement Layer 2 to FAIL even though production trades are
-    # unaffected. Changed to false so that high violation rates during warmup
-    # surface as INCONCLUSIVE (exit 0) rather than hard-FAIL.
-    # Revert to true once ensemble exits DISABLE_DEFAULT posture and
-    # lift_fraction >= min_lift_fraction (0.25) over 20+ fresh audit windows.
-    fail_on_violation_during_holding_period: false
+    # unaffected.
+    # 2026-04-19: Reverted to true. Revert conditions met:
+    #   - ensemble.enabled=true (no longer DISABLE_DEFAULT)
+    #   - lift_fraction=57.14% >= 25% over 35 effective audit windows (> 20)
+    #   - violation_rate=31.43% within 35% ceiling
+    fail_on_violation_during_holding_period: true
 
     # WIRE-03 fix: maximum days the system may stay in INCONCLUSIVE warmup before
     # --allow-inconclusive-lift is treated as FAIL. Prevents indefinite bypass.

@@ -1,4 +1,4 @@
-﻿"""
+"""
 update_platt_outcomes.py - Platt scaling outcome reconciliation.
 
 Reads logs/signals/quant_validation.jsonl, queries trade_executions for closed

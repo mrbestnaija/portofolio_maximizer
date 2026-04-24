@@ -1,5 +1,5 @@
 # Supported Python runtime: >=3.10,<3.13 (see Documentation/RUNTIME_GUARDRAILS.md)
-# Last updated: 2026-04-04 (Security: curl-cffi 0.13.0->0.15.0 CVE-2026-33752 SSRF)
+# Last updated: 2026-04-19 (Schema v4 readiness: pandas_market_calendars pin for schedule-aware freshness)
 # Observability note: provision Prometheus, Alertmanager, Grafana, Loki, and Alloy under tools/observability or via scripts/install_observability_stack.ps1 rather than pip.
 # Unfixed: pygments 2.19.2 CVE-2026-4539 (local-only ReDoS, no fix released); ignored in CI via --ignore-vuln-id.
 aiohappyeyeballs==2.6.1
@@ -57,6 +57,7 @@ ollama==0.6.0
 packaging==26.0
 pandas==2.3.3
 pandas-datareader==0.10.0
+pandas_market_calendars>=5.3.2,<6
 patsy==1.0.2
 peewee==3.18.3
 pillow==12.1.1

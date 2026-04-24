@@ -200,6 +200,11 @@ class TimeSeriesForecaster:
         # P2-B: metrics injected by RollingWindowValidator from prior fold's evaluate().
         # Used as OOS proxy when no disk audit exists and self._latest_metrics is empty.
         self._cv_fold_metrics: Dict[str, Dict[str, Any]] = {}
+        # Summarizes the OOS evidence source used for ensemble selection on the
+        # latest forecast pass.  This is surfaced into the dashboard so operators
+        # can tell whether the blend used same-instance holdout, disk-backed OOS,
+        # CV proxy metrics, or heuristic fallback.
+        self._oos_selection_health: Dict[str, Any] = {}
         self._model_errors: Dict[str, str] = {}
         self._model_events: list[Dict[str, Any]] = []
         self._regime_result: Optional[Dict[str, Any]] = None
@@ -1522,6 +1527,7 @@ class TimeSeriesForecaster:
         if ensemble:
             results["ensemble_forecast"] = ensemble["forecast_bundle"]
             results["ensemble_metadata"] = ensemble["metadata"]
+            results["ensemble_health"] = dict(ensemble["metadata"].get("health") or {})
             ensemble_meta = ensemble["metadata"]
             self._instrumentation.record_artifact(
                 "ensemble_weights", ensemble_meta.get("weights", {})
@@ -1590,6 +1596,7 @@ class TimeSeriesForecaster:
         else:
             results["ensemble_forecast"] = None
             results["ensemble_metadata"] = {}
+            results["ensemble_health"] = {}
             # Reuse the same single-model order as DISABLE_DEFAULT fallback so
             # MSSA_RL stays containment-only rather than becoming the implicit
             # default path in non-ensemble runs.
@@ -1649,6 +1656,55 @@ class TimeSeriesForecaster:
         # Phase 7.14-D: alias for DB persistence (database_manager reads 'detected_regime')
         results["detected_regime"] = results["regime"] if results["regime"] != "STATIC" else None
         self._instrumentation.set_dataset_metadata(detected_regime=results["detected_regime"])
+        if not results.get("evidence_health"):
+            fallback_oos = dict(self._oos_selection_health or {})
+            audit_history = self._audit_history_stats()
+            source_kind = str(fallback_oos.get("source_kind") or "none")
+            freshness_status = str(fallback_oos.get("freshness_status") or "missing")
+            fallback_class = str(fallback_oos.get("quality") or source_kind)
+            evidence_health = {
+                "status": "WARN",
+                "issues": [],
+                "source_kind": source_kind,
+                "source_dir": fallback_oos.get("source_dir"),
+                "freshness_status": freshness_status,
+                "fallback_class": fallback_class,
+                "oos_metrics_available": bool(fallback_oos.get("tracked_models")),
+                "rmse_rank_active": bool(fallback_oos.get("rmse_rank_active")),
+                "coverage_ratio": None,
+                "n_used_windows": None,
+                "n_skipped_missing_metrics": None,
+                "lift_ci_low": None,
+                "lift_ci_high": None,
+                "samossa_da_zero_pct": None,
+                "audit_history_effective_n": audit_history.get("effective_n"),
+                "audit_history_lift_fraction": audit_history.get("lift_fraction"),
+                "audit_history_violation_rate": audit_history.get("violation_rate"),
+                "production_ok": False,
+                "research_ok": True,
+            }
+            if evidence_health["source_kind"] in {"heuristic_fallback", "cv_fold_proxy", "none", "blocked"}:
+                evidence_health["issues"].append("oos_proxy_or_heuristic")
+            if not evidence_health["oos_metrics_available"]:
+                evidence_health["issues"].append("oos_metrics_unavailable")
+            if not evidence_health["rmse_rank_active"]:
+                evidence_health["issues"].append("rmse_rank_inactive")
+            if evidence_health["freshness_status"] in {"stale", "blocked", "missing", "proxy"}:
+                evidence_health["issues"].append("evidence_freshness_unhealthy")
+            if evidence_health["issues"]:
+                results.setdefault("health", {})
+                if isinstance(results["health"], dict):
+                    results["health"].setdefault("status", "WARN")
+                    issues = results["health"].get("issues")
+                    if isinstance(issues, list):
+                        if "evidence_not_production_ready" not in issues:
+                            issues.append("evidence_not_production_ready")
+                    else:
+                        results["health"]["issues"] = ["evidence_not_production_ready"]
+            results["evidence_health"] = evidence_health
+            if isinstance(results.get("health"), dict):
+                results["health"]["evidence_health"] = evidence_health
+            self._instrumentation.record_artifact("evidence_health", evidence_health)
         results["effective_default_model"] = results.get("default_model")
         if results.get("default_model") is not None:
             self._instrumentation.record_artifact(
@@ -1812,6 +1868,11 @@ class TimeSeriesForecaster:
             payload["event_type"] = self._audit_event_type
         if self._audit_evidence_context:
             payload["evidence_context"] = self._audit_evidence_context
+        artifacts = payload.setdefault("artifacts", {})
+        if isinstance(artifacts, dict) and "evidence_health" not in artifacts:
+            fallback_evidence = dict(self._oos_selection_health or {})
+            if fallback_evidence:
+                artifacts["evidence_health"] = _make_json_safe(fallback_evidence)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         with output_path.open("w", encoding="utf-8") as handle:
             json.dump(_make_json_safe(payload), handle, indent=2)
@@ -2041,6 +2102,25 @@ class TimeSeriesForecaster:
                     )
 
             coordinator = EnsembleCoordinator(self._ensemble_config)
+            garch_summary = (self._model_summaries or {}).get("garch", {})
+            samossa_summary = (self._model_summaries or {}).get("samossa", {})
+            mssa_summary = (self._model_summaries or {}).get("mssa_rl", {})
+
+            def _mssa_is_eligible(summary: Dict[str, Any]) -> bool:
+                if not isinstance(summary, dict):
+                    return False
+                policy_status = str(summary.get("policy_status") or "").strip().lower()
+                if policy_status != "ready":
+                    return False
+                try:
+                    if int(summary.get("policy_support") or 0) <= 0:
+                        return False
+                except Exception:
+                    return False
+                residual = summary.get("residual_diagnostics") or {}
+                if not isinstance(residual, dict):
+                    return False
+                return residual.get("white_noise") is True
             # P0 fix (2026-03-29): pass trailing OOS metrics so derive_model_confidence
             # can build non-empty RMSE-rank and _score_from_metrics scores.
             # Priority:
@@ -2079,6 +2159,146 @@ class TimeSeriesForecaster:
                         "[TS_MODEL] P0 OOS DA wired into select_weights: %s",
                         {m: f"{v:.3f}" for m, v in _oos_da.items()},
                     )
+
+            def _summarize_oos_metrics(
+                source_kind: str,
+                source_dir: Optional[str],
+                *,
+                quality: str,
+                reason: str,
+                metrics: Optional[Dict[str, Dict[str, Any]]],
+                source_path: Optional[str] = None,
+            ) -> Dict[str, Any]:
+                metric_map = metrics or {}
+                tracked_models = sorted(
+                    model for model, model_metrics in metric_map.items()
+                    if isinstance(model_metrics, dict)
+                )
+                finite_rmse_models = 0
+                finite_rmse_model_names: list[str] = []
+                finite_da_models = 0
+                finite_da_model_names: list[str] = []
+                for model, model_metrics in metric_map.items():
+                    if not isinstance(model_metrics, dict):
+                        continue
+                    rmse_val = model_metrics.get("rmse")
+                    da_val = model_metrics.get("directional_accuracy")
+                    try:
+                        if rmse_val is not None and np.isfinite(float(rmse_val)):
+                            finite_rmse_models += 1
+                            finite_rmse_model_names.append(model)
+                    except Exception:
+                        pass
+                    try:
+                        if da_val is not None and np.isfinite(float(da_val)):
+                            finite_da_models += 1
+                            finite_da_model_names.append(model)
+                    except Exception:
+                        pass
+
+                rmse_rank_active = finite_rmse_models >= 2
+                status = "OK"
+                if source_kind in {"none", "blocked"} or quality in {"heuristic_fallback", "proxy", "invalid_context"}:
+                    status = "WARN"
+                if source_kind == "blocked":
+                    status = "FAIL"
+                elif not rmse_rank_active:
+                    status = "WARN"
+
+                return {
+                    "status": status,
+                    "source_kind": source_kind,
+                    "source_dir": source_dir,
+                    "source_path": source_path,
+                    "quality": quality,
+                    "reason": reason,
+                    "tracked_models": tracked_models,
+                    "finite_rmse_models": finite_rmse_models,
+                    "finite_rmse_model_names": finite_rmse_model_names,
+                    "finite_da_models": finite_da_models,
+                    "finite_da_model_names": finite_da_model_names,
+                    "rmse_rank_active": rmse_rank_active,
+                    "directional_accuracy_models": sorted(_oos_da.keys()) if _oos_da else [],
+                }
+
+            oos_health = dict(self._oos_selection_health or {})
+            if _oos_for_selection is self._latest_metrics:
+                oos_health = _summarize_oos_metrics(
+                    "latest_metrics",
+                    "memory",
+                    quality="observed_holdout",
+                    reason="same_instance_evaluate",
+                    metrics=_oos_for_selection,
+                )
+            elif _oos_for_selection is self._cv_fold_metrics:
+                oos_health = _summarize_oos_metrics(
+                    "cv_fold_proxy",
+                    "cv_fold",
+                    quality="proxy",
+                    reason="prior_fold_metrics",
+                    metrics=_oos_for_selection,
+                )
+            elif _oos_for_selection:
+                source_kind = str((self._oos_selection_health or {}).get("source_kind") or "disk_unknown")
+                source_dir = (self._oos_selection_health or {}).get("source_dir")
+                source_path = (self._oos_selection_health or {}).get("source_path")
+                quality = str((self._oos_selection_health or {}).get("quality") or "observed_oos")
+                reason = str((self._oos_selection_health or {}).get("reason") or "disk_metrics_loaded")
+                oos_health = _summarize_oos_metrics(
+                    source_kind,
+                    source_dir,
+                    quality=quality,
+                    reason=reason,
+                    metrics=_oos_for_selection,
+                    source_path=source_path,
+                )
+            elif not oos_health:
+                oos_health = _summarize_oos_metrics(
+                    "none",
+                    None,
+                    quality="heuristic_fallback",
+                    reason="no_oos_metrics_available",
+                    metrics={},
+                )
+            else:
+                tracked_models = sorted(set(oos_health.get("tracked_models") or []))
+                finite_rmse_model_names = list(
+                    oos_health.get("finite_rmse_model_names") or tracked_models
+                )
+                finite_rmse_models = oos_health.get("finite_rmse_models")
+                if not isinstance(finite_rmse_models, int):
+                    finite_rmse_models = len(finite_rmse_model_names)
+                finite_da_model_names = list(
+                    oos_health.get("finite_da_model_names") or sorted((_oos_da or {}).keys())
+                )
+                finite_da_models = oos_health.get("finite_da_models")
+                if not isinstance(finite_da_models, int):
+                    finite_da_models = len(finite_da_model_names)
+                oos_health.setdefault("tracked_models", tracked_models)
+                oos_health.setdefault("finite_rmse_models", finite_rmse_models)
+                oos_health.setdefault("finite_rmse_model_names", finite_rmse_model_names)
+                oos_health.setdefault("finite_da_models", finite_da_models)
+                oos_health.setdefault("finite_da_model_names", finite_da_model_names)
+                oos_health.setdefault("rmse_rank_active", finite_rmse_models >= 2)
+                oos_health.setdefault("status", "OK" if finite_rmse_models >= 2 else "WARN")
+                oos_health.setdefault("quality", "observed_oos")
+                oos_health.setdefault("reason", "disk_metrics_loaded")
+
+            unstable_garch_modes = {"near_igarch", "convergence_failure", "exploding_variance_ratio"}
+            garch_residual_diag = garch_summary.get("residual_diagnostics") or {}
+            garch_fallback_mode = str(garch_summary.get("fallback_mode") or "none").strip().lower()
+            garch_white_noise = True
+            if isinstance(garch_residual_diag, dict):
+                garch_white_noise = bool(garch_residual_diag.get("white_noise", True))
+            garch_degraded = garch_fallback_mode in unstable_garch_modes or not garch_white_noise
+            garch_base_score = confidence.get("garch")
+            garch_score = None
+            if isinstance(garch_base_score, (int, float)):
+                garch_score = float(garch_base_score)
+            if garch_score is not None and garch_degraded:
+                garch_score = float(np.clip(garch_score * 0.90, 0.05, 0.95))
+            if garch_score is not None:
+                confidence["garch"] = garch_score
             weights, score = coordinator.select_weights(confidence, model_directional_accuracy=_oos_da)
             weights = self._enforce_convexity(weights)
             # P1a: apply accuracy ceiling AFTER selection so it does not collapse
@@ -2146,11 +2366,44 @@ class TimeSeriesForecaster:
             "selection_score": score,
             "primary_model": primary_model,
         }
+        ensemble_health = {
+            "status": "OK",
+            "issues": [],
+            "oos_evidence": oos_health,
+            "mssa_rl": {
+                "eligible": bool(_mssa_is_eligible(mssa_summary)),
+                "policy_status": str(mssa_summary.get("policy_status") or "").strip().lower() or None,
+                "policy_support": int(mssa_summary.get("policy_support") or 0) if mssa_summary.get("policy_support") is not None else 0,
+                "white_noise": (
+                    (mssa_summary.get("residual_diagnostics") or {}).get("white_noise")
+                    if isinstance(mssa_summary.get("residual_diagnostics"), dict)
+                    else None
+                ),
+            },
+            "garch": {
+                "fallback_mode": garch_fallback_mode,
+                "degraded": garch_degraded,
+                "white_noise": garch_white_noise,
+                "domain_score": garch_base_score,
+                "combined_score": garch_score,
+            },
+            "ensemble": {
+                "rmse_rank_active": bool(oos_health.get("rmse_rank_active")),
+                "allow_as_default": None,
+                "ensemble_status": None,
+                "ensemble_decision_reason": None,
+                "selection_score": score,
+                "confidence_scaling": bool(self._ensemble_config.confidence_scaling),
+                "primary_model": primary_model,
+                "weights": dict(weights),
+            },
+        }
         if blended.get("ensemble_index_mismatch"):
             metadata["ensemble_index_mismatch"] = True
         preselection_gate = self._preselection_default_gate()
         metadata["preselection_gate"] = preselection_gate
         metadata["allow_as_default"] = bool(preselection_gate.get("allow_as_default", True))
+        ensemble_health["ensemble"]["allow_as_default"] = metadata["allow_as_default"]
         if metadata.get("ensemble_index_mismatch"):
             metadata["allow_as_default"] = False
             metadata["ensemble_status"] = "DISABLE_DEFAULT"
@@ -2184,6 +2437,65 @@ class TimeSeriesForecaster:
                 threshold=preselection_gate.get("threshold"),
                 effective_audits=preselection_gate.get("effective_n"),
             )
+        ensemble_health["ensemble"]["allow_as_default"] = metadata["allow_as_default"]
+        ensemble_health["ensemble"]["ensemble_status"] = metadata.get("ensemble_status")
+        ensemble_health["ensemble"]["ensemble_decision_reason"] = metadata.get("ensemble_decision_reason")
+        ensemble_health["status"] = "OK"
+        if not ensemble_health["oos_evidence"].get("rmse_rank_active"):
+            ensemble_health["status"] = "WARN"
+            ensemble_health["issues"].append("oos_rank_inactive")
+        if not ensemble_health["mssa_rl"].get("eligible", False):
+            ensemble_health["status"] = "WARN"
+            ensemble_health["issues"].append("mssa_rl_white_noise_failed")
+        if ensemble_health["garch"].get("degraded"):
+            ensemble_health["status"] = "WARN"
+            ensemble_health["issues"].append("garch_unstable_reliance")
+        if not metadata.get("allow_as_default", True):
+            ensemble_health["status"] = "WARN"
+            ensemble_health["issues"].append("default_path_disabled")
+        audit_history = self._audit_history_stats()
+        evidence_health = {
+            "status": "OK",
+            "issues": [],
+            "source_kind": oos_health.get("source_kind"),
+            "source_dir": oos_health.get("source_dir"),
+            "freshness_status": oos_health.get("freshness_status"),
+            "fallback_class": oos_health.get("quality"),
+            "oos_metrics_available": bool(oos_health.get("tracked_models")),
+            "rmse_rank_active": bool(oos_health.get("rmse_rank_active")),
+            "coverage_ratio": None,
+            "n_used_windows": None,
+            "n_skipped_missing_metrics": None,
+            "lift_ci_low": None,
+            "lift_ci_high": None,
+            "samossa_da_zero_pct": None,
+            "audit_history_effective_n": audit_history.get("effective_n"),
+            "audit_history_lift_fraction": audit_history.get("lift_fraction"),
+            "audit_history_violation_rate": audit_history.get("violation_rate"),
+            "production_ok": True,
+        }
+        if evidence_health["source_kind"] in {"heuristic_fallback", "cv_fold_proxy", "none", "blocked"}:
+            evidence_health["issues"].append("oos_proxy_or_heuristic")
+        if not evidence_health["oos_metrics_available"]:
+            evidence_health["issues"].append("oos_metrics_unavailable")
+        if not evidence_health["rmse_rank_active"]:
+            evidence_health["issues"].append("rmse_rank_inactive")
+        if evidence_health["freshness_status"] in {"stale", "blocked", "missing", "proxy"}:
+            evidence_health["issues"].append("evidence_freshness_unhealthy")
+        if evidence_health["issues"]:
+            evidence_health["status"] = "WARN"
+            evidence_health["production_ok"] = False
+            evidence_health["research_ok"] = True
+            ensemble_health["status"] = "WARN"
+            ensemble_health["issues"].append("evidence_not_production_ready")
+        else:
+            evidence_health["research_ok"] = True
+        metadata["evidence_health"] = evidence_health
+        ensemble_health["evidence_health"] = evidence_health
+        metadata["health"] = ensemble_health
+        forecast_bundle["health"] = ensemble_health
+        forecast_bundle["evidence_health"] = evidence_health
+        self._instrumentation.record_artifact("evidence_health", evidence_health)
         return {"forecast_bundle": forecast_bundle, "metadata": metadata}
 
     # Minimum SAMoSSA trend_strength to keep it as preferred fallback.
@@ -2458,6 +2770,16 @@ class TimeSeriesForecaster:
         no matching file has evaluation_metrics — all safe no-op cases.
         """
         if not self._audit_dir or not self._audit_dir.exists():
+            self._oos_selection_health = {
+                "source_kind": "none",
+                "source_dir": None,
+                "source_path": None,
+                "quality": "heuristic_fallback",
+                "reason": "audit_dir_missing",
+                "finite_rmse_models": 0,
+                "tracked_models": [],
+                "freshness_status": "missing",
+            }
             return {}
 
         # Read current context from instrumentation metadata set during fit()/forecast().
@@ -2479,19 +2801,35 @@ class TimeSeriesForecaster:
             logger.debug(
                 "[TS_MODEL] _load_trailing_oos_metrics: skipping — current ticker unknown"
             )
+            self._oos_selection_health = {
+                "source_kind": "blocked",
+                "source_dir": str(self._audit_dir.name),
+                "source_path": None,
+                "quality": "invalid_context",
+                "reason": "current_ticker_unknown",
+                "finite_rmse_models": 0,
+                "tracked_models": [],
+                "freshness_status": "blocked",
+            }
             return {}
 
         from forcester_ts.ensemble import TRACKED_MODELS  # local import avoids cycle
 
         def _scan_dir_for_oos(
             scan_dir: Path,
+            max_age_sec: Optional[float] = None,
         ) -> Optional[Dict[str, Dict[str, Any]]]:
             """Scan one audit directory for the most recent matching OOS metrics.
 
             Returns a non-empty per-model dict on the first match, or None when
             the directory is absent, empty, or contains no files with
             evaluation_metrics for this ticker + horizon.
+
+            max_age_sec: if set, skip files older than this many seconds (staleness
+            guard). Used for research/ tertiary scan to prevent CV metrics from a
+            prior market regime silently polluting live RMSE-rank model selection.
             """
+            import time as _time
             try:
                 dir_files = sorted(
                     scan_dir.glob("forecast_audit_*.json"),
@@ -2502,6 +2840,32 @@ class TimeSeriesForecaster:
                 return None
             if not dir_files:
                 return None
+
+            if max_age_sec is not None:
+                _now = _time.time()
+                dir_files = [p for p in dir_files if (_now - p.stat().st_mtime) <= max_age_sec]
+                if not dir_files:
+                    self._oos_selection_health = {
+                        "source_kind": f"stale_{scan_dir.name}",
+                        "source_dir": scan_dir.name,
+                        "source_path": None,
+                        "quality": "stale_rejected",
+                        "reason": "all_files_stale",
+                        "finite_rmse_models": 0,
+                        "tracked_models": [],
+                        "freshness_status": "stale",
+                        "stale_guard_days": max_age_sec / 86400,
+                        "ticker": current_ticker,
+                        "horizon": current_horizon,
+                    }
+                    logger.warning(
+                        "[TS_MODEL] _load_trailing_oos_metrics: all %s audit files "
+                        "are older than %.0f days — RMSE-rank disabled for this run. "
+                        "Re-run ETL pipeline to refresh OOS metrics.",
+                        scan_dir.name,
+                        max_age_sec / 86400,
+                    )
+                    return None
 
             for path in dir_files:
                 try:
@@ -2534,6 +2898,30 @@ class TimeSeriesForecaster:
                     if k in TRACKED_MODELS and isinstance(v, dict)
                 }
                 if component:
+                    finite_rmse_models = 0
+                    finite_models: list[str] = []
+                    for model, model_metrics in component.items():
+                        rmse_val = model_metrics.get("rmse")
+                        try:
+                            if rmse_val is not None and np.isfinite(float(rmse_val)):
+                                finite_rmse_models += 1
+                                finite_models.append(model)
+                        except Exception:
+                            continue
+                    self._oos_selection_health = {
+                        "source_kind": f"disk_{scan_dir.name}",
+                        "source_dir": scan_dir.name,
+                        "source_path": str(path),
+                        "quality": "observed_oos",
+                        "reason": "evaluation_metrics_loaded",
+                        "finite_rmse_models": finite_rmse_models,
+                        "finite_rmse_model_names": finite_models,
+                        "tracked_models": sorted(component.keys()),
+                        "freshness_status": "fresh",
+                        "stale_guard_days": max_age_sec / 86400 if max_age_sec is not None else None,
+                        "ticker": current_ticker,
+                        "horizon": current_horizon,
+                    }
                     logger.info(
                         "[TS_MODEL] Loaded trailing OOS metrics from audit %s "
                         "(dir=%s ticker=%s horizon=%s %d models)",
@@ -2553,19 +2941,29 @@ class TimeSeriesForecaster:
         if result:
             return result
 
-        # Secondary scan: production_eval/ (OOS eval audits written by ETL/CV runs).
-        # Live auto_trader instances need OOS metrics from prior ETL runs to activate
-        # RMSE-rank scoring in derive_model_confidence().  Without this, RMSE-rank is
-        # permanently dead in live mode because auto_trader never writes evaluation_metrics.
-        # production_eval/ is the canonical location for RMSE_ONLY audit files after
-        # the evidence split (commit 525c661).  Look for it as a sibling of _audit_dir.
+        # Secondary scan: production_eval/ (RMSE_ONLY audits from evidence-sprint runs).
+        # These files currently have no evaluation_metrics — auto_trader never calls
+        # evaluate() so they're empty.  Keep scan for forward-compatibility.
         eval_dir = self._audit_dir.parent / "production_eval"
         if eval_dir != self._audit_dir and eval_dir.exists():
             result = _scan_dir_for_oos(eval_dir)
             if result:
                 return result
 
-        # Post-scan: log if the primary dir had files but no metric match.
+        # Tertiary scan: research/ (ETL/CV audit files written by run_etl_pipeline.py
+        # with --use-cv).  These are the ONLY files that contain evaluation_metrics
+        # because evaluate() requires actual future prices, which only CV runs have.
+        # Without this scan, RMSE-rank is permanently dead in live auto_trader mode:
+        # production/ and production_eval/ never have evaluation_metrics, so
+        # _load_trailing_oos_metrics() always returns {} and RMSE-rank falls back to
+        # heuristic SAMoSSA-EVR/GARCH-AIC scoring, capping confidence at ~0.35.
+        research_dir = self._audit_dir.parent / "research"
+        if research_dir != self._audit_dir and research_dir.exists():
+            result = _scan_dir_for_oos(research_dir, max_age_sec=30 * 86400)
+            if result:
+                return result
+
+        # Post-scan: log if the primary dir had files but no metric match in any dir.
         try:
             primary_count = sum(1 for _ in self._audit_dir.glob("forecast_audit_*.json"))
         except Exception:
@@ -2573,7 +2971,7 @@ class TimeSeriesForecaster:
         if primary_count:
             logger.warning(
                 "[TS_MODEL] _load_trailing_oos_metrics: scanned %d audit file(s) in %s "
-                "(+ production_eval if present) for ticker=%s horizon=%s — "
+                "(+ production_eval + research if present) for ticker=%s horizon=%s — "
                 "no matching file with evaluation_metrics found. "
                 "RMSE-rank will fall back to heuristic scoring.",
                 primary_count,
@@ -2581,6 +2979,18 @@ class TimeSeriesForecaster:
                 current_ticker,
                 current_horizon,
             )
+            self._oos_selection_health = {
+                "source_kind": "no_match",
+                "source_dir": self._audit_dir.name,
+                "source_path": None,
+                "quality": "heuristic_fallback",
+                "reason": "no_matching_evaluation_metrics",
+                "finite_rmse_models": 0,
+                "tracked_models": [],
+                "freshness_status": "unknown",
+                "ticker": current_ticker,
+                "horizon": current_horizon,
+            }
 
         # P2-B: No disk audit found. Fall back to prior CV fold metrics injected
         # by RollingWindowValidator. This gives derive_model_confidence non-empty
@@ -2590,8 +3000,46 @@ class TimeSeriesForecaster:
                 "[TS_MODEL] No disk audit found; using prior CV fold OOS proxy (%d models)",
                 len(self._cv_fold_metrics),
             )
+            finite_rmse_models = 0
+            finite_models: list[str] = []
+            for model, model_metrics in self._cv_fold_metrics.items():
+                if not isinstance(model_metrics, dict):
+                    continue
+                rmse_val = model_metrics.get("rmse")
+                try:
+                    if rmse_val is not None and np.isfinite(float(rmse_val)):
+                        finite_rmse_models += 1
+                        finite_models.append(model)
+                except Exception:
+                    continue
+            self._oos_selection_health = {
+                "source_kind": "cv_fold_proxy",
+                "source_dir": "cv_fold",
+                "source_path": None,
+                "quality": "proxy",
+                "reason": "prior_fold_metrics",
+                "finite_rmse_models": finite_rmse_models,
+                "finite_rmse_model_names": finite_models,
+                "tracked_models": sorted(k for k, v in self._cv_fold_metrics.items() if isinstance(v, dict)),
+                "freshness_status": "proxy",
+                "ticker": current_ticker,
+                "horizon": current_horizon,
+            }
             return self._cv_fold_metrics
 
+        if not self._oos_selection_health:
+            self._oos_selection_health = {
+                "source_kind": "none",
+                "source_dir": None,
+                "source_path": None,
+                "quality": "heuristic_fallback",
+                "reason": "no_oos_metrics_available",
+                "finite_rmse_models": 0,
+                "tracked_models": [],
+                "freshness_status": "missing",
+                "ticker": current_ticker,
+                "horizon": current_horizon,
+            }
         return {}
 
     def _preselection_default_gate(self) -> Dict[str, Any]:

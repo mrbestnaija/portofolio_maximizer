@@ -3,7 +3,7 @@
 [![Python 3.10-3.12](https://img.shields.io/badge/python-3.10--3.12-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Phase 11 Active](https://img.shields.io/badge/Phase%2011-Active-blue.svg)](Documentation/)
-[![Fast Lane: 2375 passing](https://img.shields.io/badge/fast%20lane-2375%20passing-success.svg)](tests/)
+[![Fast Lane: 2400+ passing](https://img.shields.io/badge/fast%20lane-2400%2B%20passing-success.svg)](tests/)
 [![Documentation](https://img.shields.io/badge/docs-comprehensive-informational.svg)](Documentation/)
 [![Research Ready](https://img.shields.io/badge/research-reproducible-purple.svg)](#-research--reproducibility)
 
@@ -13,68 +13,102 @@
 > **Barbell asymmetry is the primary economic objective. The system optimizes for asymmetric upside with bounded downside (omega_ratio > 1 vs NGN 31% annual hurdle), not for symmetric textbook efficiency metrics.**
 
 **Version**: 4.5
-**Status**: Phase 11 active — Nigeria production path, lot-aware close linkage, domain-calibrated barbell objective
-**Last Updated**: 2026-04-12
+**Status**: Phase 11 active — evidence pipeline hardened, canonical proof complete, Phase 3 ticker culling unblocked
+**Last Updated**: 2026-04-23
 
 ## Contributing
 
 Contribution policy lives in [CONTRIBUTING.md](CONTRIBUTING.md).
 Telemetry changes must follow the Evidence Integrity Contract (schema version bump + adversarial coverage update).
 
-## Current Repo Truth (2026-04-12)
+## Current Repo Truth (2026-04-23)
 
-- **Canonical objective**: `domain_utility` barbell mode — omega_ratio vs NGN 31% annual hurdle
-  (`DAILY_NGN_THRESHOLD = (1.31)^(1/252)-1 ≈ 0.00108/day`) is the primary metric. Win rate is
-  a diagnostic, not a gate. `expected_profit` remains the default hard economic blocker; forecast-edge
-  RMSE / terminal directional accuracy are soft by default and must be explicitly promoted via
-  `quant_validation.hard_gate_criteria` before they can veto asymmetric-payoff trades.
-  See `Documentation/REPO_WIDE_MATRIX_FIRST_REMEDIATION_2026-04-08.md`.
+### Gate State
 
-- **Live funnel: lot-aware close linkage (commit 521c37e)** — `trade_close_allocations` table
-  + `trade_close_linkages` view enable a single closing trade to link multiple openers (e.g. NVDA
-  close id=322 against lots 316+317). All gate queries route through the view. `repair_unlinked_closes.py`
-  hardened to reject synthetic-ancestry matches. `PaperTradingEngine` does FIFO lot matching
-  at close time and persists allocation rows automatically.
+| Gate | Status | Blocking on |
+|------|--------|-------------|
+| PnL integrity | PASS | — |
+| Evidence hygiene | PASS | — (6 synthetic files quarantined 2026-04-23) |
+| RMSE lift | INCONCLUSIVE | needs ≥7 more ETL `--as-of-date` runs |
+| THIN_LINKAGE | FAIL | matched=3/10 (need 7 more live closes) |
+| `production_audit_gate` posture | FAIL (`INCONCLUSIVE_BLOCKED`) | above |
+| `institutional_unattended_gate` | FAIL | posture not GENUINE_PASS |
+| `overall_passed` | **False** | THIN_LINKAGE + INCONCLUSIVE |
 
-- **Gate state (2026-04-12)**:
-  - `ci_integrity_gate`: **PASS** — cross-mode contamination blocker cleared; current closes are clean.
-  - `check_quant_validation_health`: **PASS** (728 PASS, 0 FAIL)
-  - `production_audit_gate`: **PASS** (`WARMUP_COVERED_PASS`) — warmup exemption covers the gap; this is not a genuine unattended pass.
-  - `institutional_unattended_gate`: **FAIL** — intentionally blocks unattended claims while posture is still warmup-covered.
-  - `overall_passed`: **False** — current stack is operationally cleaner, but it still does not genuinely pass on its own merit yet.
+### Canonical Performance (2026-04-23, `production_closed_trades`)
 
-- **Live data-source contract**: default secure profile still prioritizes `yfinance`, but `DATA_SOURCE=ctrader`
-  is now honoured by `DataSourceManager` and `run_auto_trader.py` warns when live runs are using
-  non-broker data while `ctrader` is available. This removes the prior documentation/code mismatch.
+| Metric | Value |
+|--------|-------|
+| Round-trips | 42 |
+| Net PnL | +$567.30 |
+| Win rate | 38.1% |
+| Ann ROI | 9.9% |
+| NGN hurdle | 28% |
+| Gap | 2.84× |
 
-- **Default tickers**: `AMZN,NVDA,MSFT` — fastest-closing live evidence candidates.
-  NVDA avg hold 0.25d; AMZN has clean producer-native NOT_DUE open evidence.
+**Exit-reason breakdown** (canonical, from `scripts/outcome_linkage_attribution_report.py`):
 
-- **DCR (Domain-Calibrated Remediation) phases 1-3 complete**:
-  - P1: missing-baseline bypass, residual enforcement, diagnostics_score pessimistic fallback,
-    GARCH variance floor 1e-12→1e-6, funnel audit logging
-  - P2-B: CV OOS proxy; P3-A: confidence calibration script; P3-B: MSSA-RL neutral-on-low-support
-  - Remaining heuristic distortion fixes (C5 OOS scan cap, C3 SAMoSSA bump, H6 SNR fallback,
-    H7 RMSE-rank silent disable, M1 EWMA convergence_ok, H2 realized_vol floor): pending
+| Exit reason | n | Avg P&L | Total |
+|-------------|---|---------|-------|
+| TIME_EXIT | 24 (57%) | +$14 | +$341 |
+| STOP_LOSS | 13 (31%) | -$60 | -$785 |
+| TAKE_PROFIT | 4 (10%) | +$253 | +$1012 |
+
+**Per-ticker** (AAPL+GS = 59.5% of all stop-loss losses — Phase 3 triggered):
+
+| Ticker | Total P&L | Status |
+|--------|-----------|--------|
+| AAPL | -$376 | CULL (pending 2 green cycles) |
+| GS | -$91 | CULL (pending 2 green cycles) |
+| NVDA | +$682 | KEEP |
+| MSFT | +$188 | KEEP |
+| GOOG | +$180 | KEEP |
+
+### Phase Status
+
+- **Phase 1+2 — ALL DEPLOYED**: R:R ≥ 2:1 gate (`models/time_series_signal_generator.py:2089`),
+  trailing stop ratchet (`execution/paper_trading_engine.py:1641`), EWMA `convergence_ok: True`
+  (`forcester_ts/garch.py:668`). No further Phase 1/2 code changes needed.
+
+- **Phase 3 — CANONICAL EVIDENCE SUPPORTS DEPLOYMENT** (blocked on 2 green weekly cycles):
+  `python scripts/build_nav_rebalance_plan.py` → inspect; apply after 2 green cycles via
+  `python scripts/apply_nav_reallocation.py --apply`.
+
+- **Evidence pipeline fixed (2026-04-23)**:
+  - Dedup collision in `check_forecast_audits.py` resolved — `matched` raised from 0 to 3.
+  - `FORECAST_AUDIT_OUTCOME_MAX_FILES_DEFAULT=10000` (was 500) prevents future re-forecast
+    bursts from displacing linked audit files outside the scan window.
+  - Contract pinned by 2 new tests in `tests/scripts/test_check_forecast_audits.py`.
+
+- **DCR phases 1-3**: All complete. All heuristic distortion fixes deployed (M1 EWMA, H2 vol floor,
+  C5 OOS scan cap, C3 SAMoSSA bump, H6 SNR fallback, H7 RMSE-rank silent disable).
 
 - **Phase 11-A (Nigeria math extension)**: `omega_ratio()`, `fractional_kelly_fat_tail()`,
   `effective_ngn_return()`, `portfolio_metrics_ngn()` in `etl/portfolio_math.py`.
-  Phases B-E (fx_layer, broker_cost_model, oanda executor) blocked until GENUINE_PASS.
+  Phases B-E (fx_layer, broker_cost_model, oanda executor) blocked until `overall_passed=True`.
 
-- **Adversarial suite barbell extension (commit 58b07a1)**: 4 new NGN-domain scenarios
-  (ngn_high_inflation, asymmetric_vol, fat_tail_crash, crisis_recovery), `compute_barbell_per_run`,
-  `summarize_barbell`, `evaluate_barbell_thresholds`. Denominator false-PASS bug fixed. 4→47 tests.
+### Path to `overall_passed=True`
 
-- **Funnel audit observability**: `logs/funnel_audit.jsonl` — 68 entries; 60 SNR_GATE (MSFT, conf≈0.37,
-  SNR≈0.79 < 1.5 threshold), 8 QUANT_VALIDATION_FAIL. SNR_GATE blocks are the primary routing
-  bottleneck. Confidence below 0.55 floor is the secondary.
+1. Run 7+ ETL `--as-of-date` historical runs → clears `GATES_FAIL`
+2. Run daily auto_trader cycles → accumulates THIN_LINKAGE (need 7 more live closes)
+3. After 2 green weekly cycles → apply Phase 3 ticker culling
+4. Once `posture=GENUINE_PASS` → institutional gate clears → `overall_passed=True`
 
-- **Latest verification**:
-  - `python -m pytest -m "not gpu and not slow" --tb=short -q`
-  - Result: **2375 passed, 3 skipped, 45 deselected, 10 xfailed** (2026-04-12)
-  - `python scripts/ci_integrity_gate.py` → `[PASS] All integrity checks passed.`
-  - `python scripts/production_audit_gate.py --unattended-profile` → `PASS, Phase3 ready=1`
-  - `python scripts/run_all_gates.py --json` → `overall_passed=false`, blocked only by the genuine-readiness latch (`WARMUP_COVERED_PASS ≠ GENUINE_PASS`)
+### Latest Verification
+
+```bash
+python -m pytest tests/ -m "not slow and not gpu and not integration" -q
+# Result: 2400+ passed (2026-04-23)
+
+python scripts/ci_integrity_gate.py
+# [PASS] All integrity checks passed.
+
+python scripts/production_audit_gate.py 2>&1 | grep -E "matched|posture|phase3"
+# Phase3 ready: 0 (reason=GATES_FAIL,THIN_LINKAGE, matched=3/3, integrity_high=0)
+
+python scripts/compute_capital_utilization.py
+# Current ann ROI: 9.9% | Gap to 28% ann: 2.84x
+```
 
 Historical sections below preserve earlier phase notes for chronology; use this section as the
 current repo baseline.

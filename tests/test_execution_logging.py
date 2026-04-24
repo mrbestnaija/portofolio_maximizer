@@ -41,3 +41,18 @@ def test_evaluate_promotions_promotes_and_demotes():
     demoted = [d["ticker"] for d in plan["demotions"]]
     assert "MTN" in promoted
     assert "CL=F" in demoted
+
+
+def test_evaluate_promotions_reports_holds_for_insufficient_or_stable_evidence():
+    summary = [
+        {"ticker": "AAPL", "bucket": "core", "total_trades": 4, "win_rate": 0.4, "profit_factor": 0.8},
+        {"ticker": "NVDA", "bucket": "speculative", "total_trades": 12, "win_rate": 0.52, "profit_factor": 1.1},
+    ]
+    rules = PromotionRules(min_trades=10, promote_win_rate=0.55, promote_profit_factor=1.2)
+    plan = evaluate_promotions(summary, bucket_map={}, rules=rules)
+
+    hold_tickers = [row["ticker"] for row in plan["holds"]]
+    assert "AAPL" in hold_tickers
+    assert "NVDA" in hold_tickers
+    assert plan["holds"][0]["action"] == "HOLD"
+    assert "hold:" in plan["holds"][0]["reason"]

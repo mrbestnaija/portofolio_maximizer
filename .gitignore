@@ -26,6 +26,10 @@ portfolio-optimizer/
 venv/
 env/
 .venv/
+# Windows backup copies of virtualenvs create huge untracked file trees.
+simpleTrader_env.windows-backup-*/
+simpleTrader_env2/
+simpleTrader_env_win/
 
 # Python cache
 __pycache__/
@@ -272,3 +276,6 @@ htmlcov/
 .coverage
 .coverage.*
 .pytest_cache/
+
+# Obsidian vault (external note-taking app for research)
+obsidian/

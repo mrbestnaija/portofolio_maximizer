@@ -113,6 +113,106 @@ def test_execute_signal_executes_and_persists_trade():
     db.close()
 
 
+def test_execute_signal_persists_ticker_status_snapshot():
+    db = DatabaseManager(":memory:")
+    validator = DummyValidator(DummyValidationResult(True, "EXECUTE", 0.9))
+    engine = PaperTradingEngine(
+        initial_capital=10_000.0,
+        slippage_pct=0.0,
+        transaction_cost_pct=0.0,
+        database_manager=db,
+        signal_validator=validator,
+    )
+
+    signal = {
+        "ticker": "AAPL",
+        "action": "BUY",
+        "confidence": 0.82,
+        "signal_id": 77,
+        "ticker_status_snapshot": "HEALTHY",
+    }
+    market_data = make_market_data(120.0)
+    result = engine.execute_signal(signal, market_data)
+
+    assert result.status == "EXECUTED"
+    assert isinstance(result.trade, Trade)
+    assert result.trade.ticker_status_snapshot == "HEALTHY"
+
+    row = db.cursor.execute(
+        "SELECT ticker_status_snapshot FROM trade_executions ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert row["ticker_status_snapshot"] == "HEALTHY"
+
+    db.close()
+
+
+def test_execute_signal_preserves_ts_signal_id_from_legacy_string_signal_id():
+    db = DatabaseManager(":memory:")
+    validator = DummyValidator(DummyValidationResult(True, "EXECUTE", 0.9))
+    engine = PaperTradingEngine(
+        initial_capital=10_000.0,
+        slippage_pct=0.0,
+        transaction_cost_pct=0.0,
+        database_manager=db,
+        signal_validator=validator,
+    )
+
+    ts_signal_id = "ts_AAPL_20260422T090000Z_abcd_0001"
+    signal = {
+        "ticker": "AAPL",
+        "action": "BUY",
+        "confidence": 0.82,
+        "signal_id": ts_signal_id,
+    }
+    market_data = make_market_data(120.0)
+    result = engine.execute_signal(signal, market_data)
+
+    assert result.status == "EXECUTED"
+    assert isinstance(result.trade, Trade)
+    assert result.trade.signal_id is None
+    assert result.trade.ts_signal_id == ts_signal_id
+
+    row = db.cursor.execute(
+        "SELECT signal_id, ts_signal_id FROM trade_executions ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert row["signal_id"] is None
+    assert row["ts_signal_id"] == ts_signal_id
+
+    db.close()
+
+
+def test_execute_signal_marks_trade_synthetic_when_data_source_is_synthetic_even_if_execution_mode_is_live():
+    db = DatabaseManager(":memory:")
+    validator = DummyValidator(DummyValidationResult(True, "EXECUTE", 0.9))
+    engine = PaperTradingEngine(
+        initial_capital=10_000.0,
+        slippage_pct=0.0,
+        transaction_cost_pct=0.0,
+        database_manager=db,
+        signal_validator=validator,
+    )
+
+    signal = {
+        "ticker": "AAPL",
+        "action": "BUY",
+        "confidence": 0.82,
+        "data_source": "synthetic",
+        "execution_mode": "live",
+    }
+    result = engine.execute_signal(signal, make_market_data(120.0))
+
+    assert result.status == "EXECUTED"
+    assert result.trade is not None
+    assert result.trade.is_synthetic == 1
+
+    row = db.cursor.execute(
+        "SELECT is_synthetic FROM trade_executions ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert int(row["is_synthetic"]) == 1
+
+    db.close()
+
+
 def test_execute_signal_uses_last_valid_market_row_when_terminal_close_is_nan():
     db = DatabaseManager(":memory:")
     validator = DummyValidator(DummyValidationResult(True, "EXECUTE", 0.9))
@@ -136,6 +236,59 @@ def test_execute_signal_uses_last_valid_market_row_when_terminal_close_is_nan():
     assert result.trade is not None
     assert result.trade.entry_price == pytest.approx(120.0, rel=1e-3)
     assert result.trade.bar_timestamp == datetime(2026, 4, 8, tzinfo=timezone.utc)
+
+    db.close()
+
+
+def test_execute_signal_applies_high_snr_holding_override(monkeypatch):
+    db = DatabaseManager(":memory:")
+    validator = DummyValidator(DummyValidationResult(True, "EXECUTE", 0.9))
+    engine = PaperTradingEngine(
+        initial_capital=10_000.0,
+        slippage_pct=0.0,
+        transaction_cost_pct=0.0,
+        database_manager=db,
+        signal_validator=validator,
+    )
+    monkeypatch.setenv("MAX_HOLDING_DAYS_CAP", "10")
+
+    signal = {
+        "ticker": "MSFT",
+        "action": "BUY",
+        "confidence": 0.8,
+        "forecast_horizon": 30,
+        "max_holding_days_override": 15,
+    }
+    result = engine.execute_signal(signal, make_market_data(120.0))
+
+    assert result.status == "EXECUTED"
+    assert engine.portfolio.max_holding_days["MSFT"] == 15
+
+    db.close()
+
+
+def test_execute_signal_uses_default_holding_cap_without_override(monkeypatch):
+    db = DatabaseManager(":memory:")
+    validator = DummyValidator(DummyValidationResult(True, "EXECUTE", 0.9))
+    engine = PaperTradingEngine(
+        initial_capital=10_000.0,
+        slippage_pct=0.0,
+        transaction_cost_pct=0.0,
+        database_manager=db,
+        signal_validator=validator,
+    )
+    monkeypatch.setenv("MAX_HOLDING_DAYS_CAP", "10")
+
+    signal = {
+        "ticker": "MSFT",
+        "action": "BUY",
+        "confidence": 0.8,
+        "forecast_horizon": 30,
+    }
+    result = engine.execute_signal(signal, make_market_data(120.0))
+
+    assert result.status == "EXECUTED"
+    assert engine.portfolio.max_holding_days["MSFT"] == 10
 
     db.close()
 
@@ -240,6 +393,80 @@ def test_regime_state_risk_multiplier_scales_position_size(tmp_path, monkeypatch
     )
 
     assert pos_size_exploration < pos_size_neutral
+
+    db.close()
+
+
+def test_candidate_sizing_knobs_reduce_new_exposure_but_not_exits():
+    db = DatabaseManager(":memory:")
+    validator = DummyValidator(DummyValidationResult(True, "EXECUTE", 0.9))
+    engine = PaperTradingEngine(
+        initial_capital=100_000.0,
+        slippage_pct=0.0,
+        transaction_cost_pct=0.0,
+        database_manager=db,
+        signal_validator=validator,
+    )
+    engine.portfolio.total_value = 100_000.0
+
+    market_data = make_market_data(100.0)
+    base_open = engine._calculate_position_size(
+        {"ticker": "AAPL", "action": "BUY", "confidence": 0.9},
+        confidence_score=0.9,
+        market_data=market_data,
+        current_position=0,
+    )
+    capped_open = engine._calculate_position_size(
+        {
+            "ticker": "AAPL",
+            "action": "BUY",
+            "confidence": 0.9,
+            "sizing_kelly_fraction_cap": 0.25,
+        },
+        confidence_score=0.9,
+        market_data=market_data,
+        current_position=0,
+    )
+    assert capped_open < base_open
+
+    baseline_add = engine._calculate_position_size(
+        {"ticker": "AAPL", "action": "BUY", "confidence": 0.9},
+        confidence_score=0.9,
+        market_data=market_data,
+        current_position=500,
+    )
+    penalized_add = engine._calculate_position_size(
+        {
+            "ticker": "AAPL",
+            "action": "BUY",
+            "confidence": 0.9,
+            "diversification_penalty": 1.0,
+        },
+        confidence_score=0.9,
+        market_data=market_data,
+        current_position=500,
+    )
+    assert penalized_add < baseline_add
+
+    baseline_exit = engine._calculate_position_size(
+        {"ticker": "AAPL", "action": "SELL", "confidence": 0.9},
+        confidence_score=0.9,
+        market_data=market_data,
+        current_position=500,
+    )
+    penalized_exit = engine._calculate_position_size(
+        {
+            "ticker": "AAPL",
+            "action": "SELL",
+            "confidence": 0.9,
+            "sizing_kelly_fraction_cap": 0.25,
+            "diversification_penalty": 1.0,
+        },
+        confidence_score=0.9,
+        market_data=market_data,
+        current_position=500,
+    )
+    assert penalized_exit == baseline_exit
 
     db.close()
 
@@ -382,6 +609,64 @@ def test_execute_signal_persists_multi_lot_close_allocations_for_same_ticker():
     assert abs(sum(float(row["allocated_shares"]) for row in allocation_rows) - 2.0) < 1e-9
 
     db.close()
+
+
+def test_execute_signal_reverse_through_flat_persists_residual_open_lot_and_resume_linkage(tmp_path):
+    db_path = tmp_path / "reverse_through_flat.db"
+    db = DatabaseManager(str(db_path))
+    validator = DummyValidator(DummyValidationResult(True, "EXECUTE", 0.9))
+    engine = PaperTradingEngine(
+        initial_capital=10_000.0,
+        slippage_pct=0.0,
+        transaction_cost_pct=0.0,
+        database_manager=db,
+        signal_validator=validator,
+    )
+    engine._calculate_position_size = lambda signal, confidence_score, market_data, current_position: 2 if str(signal.get("action") or "").upper() == "BUY" else 5  # type: ignore[method-assign]
+
+    entry_result = engine.execute_signal(
+        {"ticker": "AAPL", "action": "BUY", "confidence": 0.9, "execution_mode": "live"},
+        make_market_data(100.0),
+    )
+    assert entry_result.status == "EXECUTED"
+
+    reverse_result = engine.execute_signal(
+        {"ticker": "AAPL", "action": "SELL", "confidence": 0.9, "execution_mode": "live"},
+        make_market_data(110.0),
+    )
+    assert reverse_result.status == "EXECUTED"
+    assert engine.portfolio.positions.get("AAPL") == -3
+    assert "AAPL" in engine.portfolio.entry_lots
+    assert len(engine.portfolio.entry_lots["AAPL"]) == 1
+    assert engine.portfolio.entry_lots["AAPL"][0]["remaining_shares"] == pytest.approx(3.0)
+
+    reverse_row = db.cursor.execute(
+        "SELECT id, entry_trade_id, is_close, position_before, position_after "
+        "FROM trade_executions ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert reverse_row is not None
+    assert int(reverse_row["is_close"]) == 1
+    assert int(reverse_row["entry_trade_id"]) > 0
+    assert float(reverse_row["position_before"]) == pytest.approx(2.0)
+    assert float(reverse_row["position_after"]) == pytest.approx(-3.0)
+    assert engine.portfolio.entry_lots["AAPL"][0]["trade_id"] == int(reverse_row["id"])
+    assert engine.portfolio.entry_trade_ids["AAPL"] == int(reverse_row["id"])
+
+    # Persist and ensure the residual opener can be reconstructed after restart.
+    engine.save_state()
+    resumed = PaperTradingEngine(
+        initial_capital=10_000.0,
+        db_path=str(db_path),
+        resume_from_db=True,
+    )
+    try:
+        assert resumed.portfolio.positions.get("AAPL") == -3
+        assert resumed.portfolio.entry_trade_ids["AAPL"] == int(reverse_row["id"])
+        assert resumed.portfolio.entry_lots["AAPL"][0]["trade_id"] == int(reverse_row["id"])
+        assert resumed.portfolio.entry_lots["AAPL"][0]["remaining_shares"] == pytest.approx(3.0)
+    finally:
+        resumed.db_manager.close()
+        db.close()
 
 
 def test_lob_fallback_uses_depth_profiles_when_depth_missing(monkeypatch):
@@ -580,3 +865,125 @@ def test_confidence_calibrated_saved_to_db():
     assert abs(row[0] - 0.62) < 1e-6
 
     db.close()
+
+
+# ---------------------------------------------------------------------------
+# FIX 1: Forced exits inherit OPEN leg's is_synthetic, not current cycle mode
+# ---------------------------------------------------------------------------
+
+class TestForcedExitSyntheticInheritance:
+    """Verify that forced-exit CLOSE legs inherit is_synthetic from the DB opener,
+    preventing execution_mode drift from contaminating live positions."""
+
+    @staticmethod
+    def _make_engine_with_open_position(
+        db, is_synthetic_open: int, entry_price: float = 100.0, stop_loss: float = 130.0
+    ):
+        """Create engine with an open BUY position and a stop_loss that market data will breach.
+
+        stop_loss=130.0 is above entry=100.0 so that make_market_data(120.0) (last bar ≈123.5)
+        satisfies current_price <= stop_loss → STOP_LOSS forced exit fires.
+        """
+        validator = DummyValidator(DummyValidationResult(True, "EXECUTE", 0.9))
+        engine = PaperTradingEngine(
+            initial_capital=10_000.0,
+            slippage_pct=0.0,
+            transaction_cost_pct=0.0,
+            database_manager=db,
+            signal_validator=validator,
+        )
+        exec_mode = "synthetic" if is_synthetic_open else "live"
+        opener_id = db.save_trade_execution(
+            ticker="AAPL",
+            trade_date=datetime(2026, 4, 1, tzinfo=timezone.utc).date(),
+            action="BUY",
+            shares=1,
+            price=entry_price,
+            total_value=entry_price,
+            commission=0.0,
+            execution_mode=exec_mode,
+            is_synthetic=is_synthetic_open,
+        )
+        engine.portfolio.positions["AAPL"] = 1
+        engine.portfolio.entry_prices["AAPL"] = entry_price
+        engine.portfolio.entry_timestamps["AAPL"] = datetime(2026, 4, 1, tzinfo=timezone.utc)
+        engine.portfolio.entry_trade_ids["AAPL"] = opener_id
+        engine.portfolio.stop_losses["AAPL"] = stop_loss  # price that triggers STOP_LOSS
+        engine.portfolio.entry_lots["AAPL"] = [
+            {"trade_id": opener_id, "action": "BUY", "remaining_shares": 1.0,
+             "is_synthetic": is_synthetic_open}
+        ]
+        return engine, opener_id
+
+    def test_forced_exit_of_live_position_stays_live(self):
+        """CLOSE forced by stop_loss breach of a live OPEN must be is_synthetic=0,
+        even when the current cycle's execution_mode is 'synthetic'."""
+        db = DatabaseManager(":memory:")
+        # stop_loss=130.0 → market data last price ≈123.5 ≤ 130.0 → STOP_LOSS fires
+        engine, _ = self._make_engine_with_open_position(db, is_synthetic_open=0)
+
+        # BUY signal with synthetic execution_mode (simulates data-source fallback cycle)
+        signal = {
+            "ticker": "AAPL",
+            "action": "BUY",
+            "confidence": 0.9,
+            "execution_mode": "synthetic",  # current cycle fell back to synthetic
+        }
+        result = engine.execute_signal(signal, make_market_data(120.0))
+        assert result.status == "EXECUTED"
+        assert result.trade is not None, "No trade returned"
+        assert result.trade.is_forced_exit == 1 or result.trade.exit_reason is not None, (
+            "Expected forced exit (STOP_LOSS) but got normal execution — "
+            "check stop_loss and market data price"
+        )
+        assert result.trade.is_synthetic == 0, (
+            "Live opener forced-exit was tagged synthetic — THIN_LINKAGE would miss this close"
+        )
+
+        row = db.cursor.execute(
+            "SELECT is_synthetic FROM trade_executions WHERE is_close=1 ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        assert row is not None
+        assert int(row["is_synthetic"]) == 0, "DB close leg has is_synthetic=1 for live opener"
+        db.close()
+
+    def test_forced_exit_of_synthetic_position_stays_synthetic(self):
+        """CLOSE forced by stop_loss of a synthetic OPEN must remain is_synthetic=1."""
+        db = DatabaseManager(":memory:")
+        engine, _ = self._make_engine_with_open_position(db, is_synthetic_open=1)
+
+        signal = {
+            "ticker": "AAPL",
+            "action": "BUY",
+            "confidence": 0.9,
+            "execution_mode": "synthetic",
+        }
+        result = engine.execute_signal(signal, make_market_data(120.0))
+        assert result.status == "EXECUTED"
+        assert result.trade is not None
+        assert result.trade.is_forced_exit == 1 or result.trade.exit_reason is not None, (
+            "Expected forced exit (STOP_LOSS)"
+        )
+        assert result.trade.is_synthetic == 1, (
+            "Synthetic opener forced-exit was incorrectly tagged is_synthetic=0"
+        )
+        db.close()
+
+    def test_forced_exit_falls_back_gracefully_when_db_unavailable(self):
+        """When opener DB lookup fails, fall back to current execution_mode — no crash."""
+        db = DatabaseManager(":memory:")
+        engine, _ = self._make_engine_with_open_position(db, is_synthetic_open=0)
+
+        # Corrupt entry_trade_ids to a non-existent ID to trigger the fallback path
+        engine.portfolio.entry_trade_ids["AAPL"] = 99999
+
+        signal = {
+            "ticker": "AAPL",
+            "action": "BUY",
+            "confidence": 0.9,
+            "execution_mode": "live",
+        }
+        # Must not raise
+        result = engine.execute_signal(signal, make_market_data(120.0))
+        assert result.status == "EXECUTED", "Graceful fallback path crashed"
+        db.close()

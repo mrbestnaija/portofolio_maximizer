@@ -160,6 +160,47 @@ def _payload_digest(payload: Dict[str, Any]) -> str:
     return hashlib.sha256(raw).hexdigest()[:16]
 
 
+def _canonical_snapshot_contract(snapshot: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    payload = snapshot if isinstance(snapshot, dict) else {}
+    errors: List[str] = []
+    emission_error = str(payload.get("emission_error") or "").strip()
+    schema_version = int(payload.get("schema_version") or 0) if payload else 0
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    alpha = payload.get("alpha_objective") if isinstance(payload.get("alpha_objective"), dict) else {}
+    alpha_quality = payload.get("alpha_model_quality") if isinstance(payload.get("alpha_model_quality"), dict) else {}
+    gate = payload.get("gate") if isinstance(payload.get("gate"), dict) else {}
+    freshness = gate.get("freshness_status") if isinstance(gate.get("freshness_status"), dict) else {}
+    source_contract = payload.get("source_contract") if isinstance(payload.get("source_contract"), dict) else {}
+
+    if emission_error:
+        errors.append(f"emission_error:{emission_error}")
+    if schema_version == 0:
+        errors.append("schema_version_0")
+    elif schema_version < 4:
+        errors.append(f"schema_version_{schema_version}")
+    if str(source_contract.get("status") or "").strip().lower() != "clean":
+        errors.append(f"source_contract:{source_contract.get('status') or 'missing'}")
+    if str(freshness.get("status") or "").strip().lower() != "fresh":
+        errors.append(f"freshness:{freshness.get('status') or 'missing'}")
+    if str(summary.get("evidence_health") or "").strip().lower() != "clean":
+        errors.append(f"evidence_health:{summary.get('evidence_health') or 'missing'}")
+    if not bool(alpha.get("objective_valid", False)):
+        errors.append("objective_valid=false")
+
+    return {
+        "ok": not errors,
+        "errors": errors,
+        "schema_version": schema_version,
+        "emission_error": emission_error or None,
+        "freshness_status": freshness.get("status"),
+        "objective_valid": bool(alpha.get("objective_valid", False)),
+        "alpha_model_quality_status": alpha_quality.get("status"),
+        "trajectory_alarm_active": bool((gate.get("trajectory_alarm") or {}).get("active")),
+        "evidence_health": summary.get("evidence_health"),
+        "source_contract_status": source_contract.get("status"),
+    }
+
+
 def _connect_ro(db_path: Path) -> sqlite3.Connection:
     uri = f"file:{db_path.as_posix()}?mode=ro"
     # [SETUP-PHASE BYPASS] The guardrail authorizer is a whitelist: any PRAGMA not in
@@ -1548,6 +1589,13 @@ def build_dashboard_payload(
             qual_records.append(rec)
     avg_q = sum(r["quality_score"] for r in qual_records) / len(qual_records) if qual_records else 0.0
     min_q = min((r["quality_score"] for r in qual_records), default=0.0)
+    robustness = _robustness_payload()
+    production_tracking = (
+        robustness.get("performance_metrics", {}).get("production_tracking", {})
+        if isinstance(robustness.get("performance_metrics"), dict)
+        and isinstance(robustness.get("performance_metrics", {}).get("production_tracking"), dict)
+        else {}
+    )
 
     def _opt_float(raw: Any) -> Optional[float]:
         try:
@@ -1610,6 +1658,7 @@ def build_dashboard_payload(
         "trade_count": _opt_int(perf.get("trade_count")),
         "performance_unknown": bool(perf.get("performance_unknown", False)),
         "performance": perf,
+        "production_tracking": production_tracking,
         "positions": positions,
         "positions_stale": positions_stale,
         "positions_asof": positions_asof,
@@ -1630,7 +1679,7 @@ def build_dashboard_payload(
         "price_series": {t: _price_series(conn, t, lookback_days) for t in tickers},
         "model_params": model_params,
         "checks": checks,
-        "robustness": _robustness_payload(),
+        "robustness": robustness,
         "live_denominator": _live_denominator_payload(),
         "quant_validation": quant_validation,
         "operator_console": _operator_console_payload(),
@@ -1764,6 +1813,8 @@ def validate_dashboard_payload_contract(
         "robustness": dict,
         "live_denominator": dict,
         "quant_validation": dict,
+        "orchestration_health": dict,
+        "preprocess_health": dict,
     }
     for key, expected_type in key_type_expectations.items():
         value = payload.get(key)
@@ -2045,13 +2096,19 @@ def _merge_dashboard_producer_artifact(
 
     # The bridge remains the canonical dashboard writer, but it still reads a
     # few runtime-only fields from the latest auto-trader snapshot.
-    for key in ("latency", "routing", "equity", "equity_realized", "forecaster_health", "regime", "notes"):
+    for key in ("latency", "routing", "equity", "equity_realized", "forecaster_health", "orchestration_health", "preprocess_health", "regime", "notes", "canonical_snapshot"):
         value = existing.get(key)
         if value is None:
             continue
         if isinstance(value, (dict, list)) and not value:
             continue
         fresh[key] = value
+    contract = _canonical_snapshot_contract(fresh.get("canonical_snapshot"))
+    fresh["canonical_snapshot_contract"] = contract
+    if not contract["ok"]:
+        checks = list(fresh.get("checks") or [])
+        checks.append("canonical_snapshot_contract_invalid")
+        fresh["checks"] = checks
     return fresh
 
 

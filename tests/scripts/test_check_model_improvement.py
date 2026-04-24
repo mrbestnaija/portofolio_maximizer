@@ -602,6 +602,7 @@ class TestPhase719Hardening:
     def test_layer1_coverage_ratio_in_required_keys(self):
         """coverage_ratio must be in LAYER_REQUIRED_KEYS[1]."""
         assert "coverage_ratio" in LAYER_REQUIRED_KEYS[1]
+        assert "evidence_health" in LAYER_REQUIRED_KEYS[1]
 
     def test_layer1_coverage_ratio_populated_on_skip(self, tmp_path):
         """Even when Layer 1 SKIPs, coverage_ratio must be present (None or 0.0)."""
@@ -609,6 +610,44 @@ class TestPhase719Hardening:
         assert result.status == "SKIP"
         # coverage_ratio in metrics (may be None from _empty_metrics or 0.0 from n_used==0)
         assert "coverage_ratio" in result.metrics
+
+    def test_layer1_emits_structured_evidence_health_bundle(self, tmp_path):
+        """Evidence-health should remain visible even when the path is research-only."""
+        for i in range(3):
+            audit = {
+                "dataset": {"ticker": f"T{i}", "start": "2025-01-01", "end": "2025-01-30", "length": 100},
+                "summary": {"forecast_horizon": 5},
+                "artifacts": {
+                    "evaluation_metrics": {
+                        "garch":    {"rmse": 1.1, "directional_accuracy": 0.6, "smape": 2.0},
+                        "samossa":  {"rmse": 1.0, "directional_accuracy": 0.7, "smape": 2.5},
+                        "mssa_rl":  {"rmse": 1.4, "directional_accuracy": 0.5, "smape": 3.0},
+                        "ensemble": {"rmse": 0.9, "directional_accuracy": 0.8},
+                    },
+                    "ensemble_weights": {"garch": 0.33, "samossa": 0.34, "mssa_rl": 0.33},
+                    "evidence_health": {
+                        "source_kind": "heuristic_fallback",
+                        "freshness_status": "stale",
+                        "oos_metrics_available": False,
+                        "rmse_rank_active": False,
+                        "fallback_class": "heuristic_fallback",
+                        "production_ok": False,
+                    },
+                },
+            }
+            (tmp_path / f"forecast_audit_{i:03d}.json").write_text(json.dumps(audit), encoding="utf-8")
+
+        result = run_layer1_forecast_quality(tmp_path, warn_coverage_threshold=1)
+
+        evidence = result.metrics["evidence_health"]
+        assert evidence["source_kind"] == "heuristic_fallback"
+        assert evidence["freshness_status"] == "stale"
+        assert evidence["oos_metrics_available"] is False
+        assert evidence["rmse_rank_active"] is False
+        assert result.metrics["source_kind"] == "heuristic_fallback"
+        assert result.metrics["fallback_class"] == "heuristic_fallback"
+        assert result.status == "WARN"
+        assert "evidence_health" in result.summary
 
 
 # ---------------------------------------------------------------------------

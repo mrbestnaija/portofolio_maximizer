@@ -66,20 +66,15 @@ def _write_production_gate_artifact(path: Path) -> None:
     )
 
 
-@pytest.mark.xfail(reason="_windows_user_env_value removed; approval-token feature refactored", strict=False)
-def test_security_posture_accepts_windows_user_env_approval_token(monkeypatch) -> None:
-    monkeypatch.delenv("OPENCLAW_AUTONOMY_APPROVAL_TOKEN", raising=False)
-    monkeypatch.setattr(
-        mod,
-        "_windows_user_env_value",
-        lambda name: "user-token-12345" if name == "OPENCLAW_AUTONOMY_APPROVAL_TOKEN" else "",
-    )
+def test_security_posture_uses_trusted_high_risk_boundary_and_ignores_legacy_token_env(monkeypatch) -> None:
+    monkeypatch.setenv("OPENCLAW_APPROVE_HIGH_RISK", "1")
+    monkeypatch.setenv("OPENCLAW_AUTONOMY_APPROVAL_TOKEN", "user-token-12345")
 
     snapshot, blockers, warnings = mod._security_posture()
 
-    assert snapshot["non_default_approval_token_configured"] is True
-    assert not any(row["code"] == "weak_approval_token" for row in blockers)
-    assert warnings == []
+    assert snapshot["trusted_high_risk_approval_enabled"] is True
+    assert not any(row["code"] == "legacy_autonomy_envs_ignored" for row in blockers)
+    assert any(row["code"] == "legacy_autonomy_envs_ignored" for row in warnings)
 
 
 def test_gate_truth_posture_detects_skip_policy_and_phase3_drift(tmp_path: Path) -> None:
@@ -310,9 +305,9 @@ def test_action_guide_cli_outputs_requested_human_steps(monkeypatch, capsys) -> 
         "readiness_status": "FAIL",
         "human_action_guides": [
             {
-                "id": "approval_token",
-                "title": "Set a non-default approval token",
-                "cli_hint": "python scripts/openclaw_production_readiness.py --action-guide approval_token",
+                "id": "approval_boundary",
+                "title": "Remove legacy autonomy env vars",
+                "cli_hint": "python scripts/openclaw_production_readiness.py --action-guide approval_boundary",
                 "steps": ["step one"],
                 "commands": ["cmd one"],
             },
@@ -327,15 +322,15 @@ def test_action_guide_cli_outputs_requested_human_steps(monkeypatch, capsys) -> 
     }
     monkeypatch.setattr(mod, "collect_openclaw_production_readiness", lambda **kwargs: payload)
 
-    rc = mod.main(["--action-guide", "approval_token", "--json"])
+    rc = mod.main(["--action-guide", "approval_boundary", "--json"])
     assert rc == 0
 
     out = capsys.readouterr().out
     guide_payload = json.loads(out)
     assert guide_payload["action"] == "production_readiness_action_guide"
-    assert guide_payload["requested_guide"] == "approval_token"
+    assert guide_payload["requested_guide"] == "approval_boundary"
     assert len(guide_payload["guides"]) == 1
-    assert guide_payload["guides"][0]["id"] == "approval_token"
+    assert guide_payload["guides"][0]["id"] == "approval_boundary"
 
 
 def test_refresh_production_gate_artifact_uses_repo_python(monkeypatch, tmp_path: Path) -> None:

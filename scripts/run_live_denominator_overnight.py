@@ -148,6 +148,38 @@ def _seconds_until_next_weekday(now: datetime) -> int:
     return (7 - weekday) * 86400
 
 
+def _production_audit_dir(audit_dir: Path) -> Path:
+    audit_dir = Path(audit_dir)
+    if audit_dir.name == "production":
+        return audit_dir
+    return audit_dir / "production"
+
+
+def _forecast_audit_sanitization_cmd(audit_dir: Path) -> list[str]:
+    production_audit_dir = _production_audit_dir(audit_dir)
+    eval_audit_dir = production_audit_dir.parent / "production_eval"
+    quarantine_dir = production_audit_dir / "quarantine"
+    return [
+        PYTHON,
+        "scripts/sanitize_production_forecast_audits.py",
+        "--audit-dir",
+        str(production_audit_dir),
+        "--eval-audit-dir",
+        str(eval_audit_dir),
+        "--quarantine-dir",
+        str(quarantine_dir),
+        "--manifest-path",
+        str(production_audit_dir / "forecast_audit_manifest.jsonl"),
+        "--eval-manifest-path",
+        str(eval_audit_dir / "forecast_audit_manifest.jsonl"),
+        "--apply",
+    ]
+
+
+def _sanitize_forecast_audits(audit_dir: Path, log_path: Path) -> int:
+    return _run_command(_forecast_audit_sanitization_cmd(audit_dir), log_path)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Run live frozen-strategy cycles overnight and record fresh denominator signals."
@@ -298,6 +330,11 @@ def main() -> int:
             ]
             trader_rc = _run_command(trader_cmd, log_path)
         cycle_record["run_auto_trader_rc"] = trader_rc
+
+        audit_sanitization_rc = None
+        if not args.dry_run:
+            audit_sanitization_rc = _sanitize_forecast_audits(Path(args.audit_dir), log_path)
+        cycle_record["forecast_audit_sanitization_rc"] = audit_sanitization_rc
 
         audit_cmd = [
             PYTHON,

@@ -252,6 +252,84 @@ def test_orphan_whitelist_ids_249_250_251_253_are_not_flagged(tmp_path):
     )
 
 
+def test_orphan_check_prefers_portfolio_state_over_stale_portfolio_positions(tmp_path):
+    """Live orphan reconciliation must honor portfolio_state before portfolio_positions.
+
+    The dashboard positions table can lag the trading engine.  If portfolio_state
+    already reflects the current live inventory, the orphan check must not fail just
+    because portfolio_positions is stale.
+    """
+    db_path = tmp_path / "portfolio_state_precedence.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE trade_executions (
+            id INTEGER PRIMARY KEY,
+            ticker TEXT NOT NULL,
+            trade_date TEXT NOT NULL,
+            action TEXT NOT NULL,
+            shares REAL,
+            price REAL,
+            close_size REAL,
+            realized_pnl REAL,
+            is_close INTEGER NOT NULL,
+            is_diagnostic INTEGER DEFAULT 0,
+            is_synthetic INTEGER DEFAULT 0,
+            is_contaminated INTEGER DEFAULT 0,
+            entry_trade_id INTEGER
+        );
+        CREATE TABLE portfolio_positions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticker TEXT NOT NULL,
+            position_date TEXT NOT NULL,
+            shares REAL NOT NULL,
+            average_cost REAL NOT NULL
+        );
+        CREATE TABLE portfolio_state (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticker TEXT NOT NULL,
+            shares INTEGER NOT NULL,
+            entry_price REAL NOT NULL,
+            entry_timestamp TEXT NOT NULL,
+            stop_loss REAL,
+            target_price REAL,
+            max_holding_days INTEGER,
+            holding_bars INTEGER DEFAULT 0,
+            entry_bar_timestamp TEXT,
+            last_bar_timestamp TEXT
+        );
+        """
+    )
+    conn.executemany(
+        "INSERT INTO trade_executions (id, ticker, trade_date, action, shares, price, realized_pnl, is_close) "
+        "VALUES (?, ?, ?, 'BUY', ?, ?, NULL, 0)",
+        [
+            (1, "AAPL", "2026-04-15", 1.0, 266.58),
+            (2, "NVDA", "2026-04-15", 1.0, 198.98),
+            (3, "NVDA", "2026-04-16", 1.0, 198.46),
+        ],
+    )
+    conn.execute(
+        "INSERT INTO portfolio_positions (ticker, position_date, shares, average_cost) "
+        "VALUES ('JPM', '2026-03-01', 9.0, 300.0)"
+    )
+    conn.executemany(
+        "INSERT INTO portfolio_state (ticker, shares, entry_price, entry_timestamp) "
+        "VALUES (?, ?, ?, ?)",
+        [
+            ("AAPL", 1, 266.58, "2026-04-15T00:00:00+00:00"),
+            ("NVDA", 2, 198.72, "2026-04-15T00:00:00+00:00"),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    with PnLIntegrityEnforcer(str(db_path), allow_schema_changes=True) as enforcer:
+        violations = enforcer._check_orphaned_positions()
+
+    assert violations == []
+
+
 # ---------------------------------------------------------------------------
 # INT-05: cross-mode contamination detection
 # ---------------------------------------------------------------------------

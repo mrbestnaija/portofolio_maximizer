@@ -5,8 +5,9 @@ summarize_sleeves.py
 
 Per-sleeve PnL summary helper.
 
-Computes basic profitability metrics (total trades, win rate, profit factor,
-total profit, average trade PnL) grouped by logical "sleeves" derived from:
+Computes rolling profitability metrics (total trades, win rate, profit factor,
+total profit, average trade PnL) grouped by logical "sleeves" derived from the
+canonical `production_closed_trades` view and a configurable lookback window.
 
 - Barbell buckets (safe/core/speculative) in config/barbell.yml, and
 - asset_class tags on trade_executions (e.g. crypto vs equity).
@@ -24,7 +25,7 @@ import sqlite3
 import sys
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -73,14 +74,39 @@ class SleeveMetrics:
         }
 
 
+def _row_value(row: sqlite3.Row | dict[str, Any], key: str, default: Any = None) -> Any:
+    if isinstance(row, dict):
+        return row.get(key, default)
+    try:
+        return row[key]
+    except Exception:
+        return default
+
+
 def _connect(db_path: str) -> sqlite3.Connection:
     conn = guarded_sqlite_connect(db_path)
     conn.row_factory = sqlite3.Row
     return conn
 
 
-def _load_trades(conn: sqlite3.Connection) -> List[sqlite3.Row]:
+def _load_trades(
+    conn: sqlite3.Connection,
+    *,
+    lookback_days: Optional[int],
+    as_of_date: Optional[str],
+) -> List[sqlite3.Row]:
     cur = conn.cursor()
+    end_date = date.fromisoformat(as_of_date) if as_of_date else date.today()
+    start_date = None
+    if lookback_days is not None:
+        start_date = end_date - timedelta(days=max(int(lookback_days), 1) - 1)
+    params: list[Any] = []
+    where_clauses: list[str] = []
+    if start_date is not None:
+        where_clauses.append("DATE(trade_date) >= DATE(?)")
+        params.append(start_date.isoformat())
+        where_clauses.append("DATE(trade_date) <= DATE(?)")
+        params.append(end_date.isoformat())
     cur.execute(
         """
         SELECT
@@ -89,9 +115,13 @@ def _load_trades(conn: sqlite3.Connection) -> List[sqlite3.Row]:
             asset_class,
             instrument_type,
             realized_pnl
-        FROM trade_executions
-        WHERE realized_pnl IS NOT NULL
-        """
+        FROM production_closed_trades
+        {where_clause}
+        ORDER BY ticker, id
+        """.format(
+            where_clause=("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+        ),
+        params,
     )
     return cur.fetchall()
 
@@ -126,11 +156,14 @@ def _aggregate_by_sleeve(
     buckets: Dict[Tuple[str, str], SleeveMetrics] = {}
 
     for row in rows:
-        ticker = str(row["ticker"])
-        ac = row.get("asset_class")
+        ticker = str(_row_value(row, "ticker", ""))
+        ac = _row_value(row, "asset_class")
+        instrument_type = str(_row_value(row, "instrument_type", "") or "").lower()
+        if not ac and instrument_type == "crypto":
+            ac = "crypto"
         sleeve = classify(ticker, ac)
         key = (sleeve, ticker)
-        pnl = float(row["realized_pnl"] or 0.0)
+        pnl = float(_row_value(row, "realized_pnl", 0.0) or 0.0)
 
         if key not in buckets:
             buckets[key] = SleeveMetrics(
@@ -168,6 +201,17 @@ def _aggregate_by_sleeve(
     help="SQLite database path used by the trading engine.",
 )
 @click.option(
+    "--lookback-days",
+    default=365,
+    show_default=True,
+    help="Rolling lookback window in days. Use 365 for weekly maintenance.",
+)
+@click.option(
+    "--as-of-date",
+    default=None,
+    help="Optional ISO date used as the window end date (defaults to today).",
+)
+@click.option(
     "--min-trades",
     default=5,
     show_default=True,
@@ -178,14 +222,14 @@ def _aggregate_by_sleeve(
     default=None,
     help="Optional path to write JSON summary (if omitted, prints table only).",
 )
-def main(db_path: str, min_trades: int, output: Optional[str]) -> None:
+def main(db_path: str, lookback_days: int, as_of_date: Optional[str], min_trades: int, output: Optional[str]) -> None:
     """
     Summarise PnL metrics per sleeve (safe/core/speculative/crypto/other).
     """
     cfg = BarbellConfig.from_yaml()
     conn = _connect(db_path)
     try:
-        rows = _load_trades(conn)
+        rows = _load_trades(conn, lookback_days=lookback_days, as_of_date=as_of_date)
     finally:
         conn.close()
 
@@ -211,9 +255,21 @@ def main(db_path: str, min_trades: int, output: Optional[str]) -> None:
     if output:
         out_path = Path(output)
         out_path.parent.mkdir(parents=True, exist_ok=True)
+        end_date = date.fromisoformat(as_of_date) if as_of_date else date.today()
+        start_date = end_date - timedelta(days=max(int(lookback_days), 1) - 1)
         payload = {
             "generated_at": date.today().isoformat(),
             "db_path": db_path,
+            "lookback_days": int(lookback_days),
+            "as_of_date": end_date.isoformat(),
+            "window": {
+                "lookback_days": int(lookback_days),
+                "start_date": start_date.isoformat(),
+                "end_date": end_date.isoformat(),
+                "state": "rolling_window",
+                "source_view": "production_closed_trades",
+            },
+            "source_view": "production_closed_trades",
             "min_trades": min_trades,
             "sleeves": [m.to_dict() for m in metrics],
         }

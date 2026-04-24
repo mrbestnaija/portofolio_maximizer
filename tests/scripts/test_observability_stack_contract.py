@@ -196,6 +196,8 @@ def test_windows_startup_scripts_and_installer_reference_repo_owned_launchers() 
     assert 'function Test-HttpHealthy' in helper_text
     assert 'function Get-HttpJson' in helper_text
     assert 'function Ensure-RepoService' in helper_text
+    assert 'simpleTrader_env_win\\Scripts\\python.exe' in helper_text
+    assert 'PMX_PYTHON_BIN' in helper_text
     assert 'function Stop-ObservedProcesses' in helper_text
     assert 'function Get-ListeningProcessIdsByPort' in helper_text
     assert 'function Wait-PortClosed' in helper_text

@@ -26,11 +26,13 @@ try:
         phase3_strict_ready as _phase3_strict_ready,
         phase3_strict_reason as _phase3_strict_reason,
     )
+    from scripts.openclaw_cron_contract import summarize_cron_jobs
 except Exception:  # pragma: no cover - script execution path fallback
     from production_gate_contract import (  # type: ignore
         phase3_strict_ready as _phase3_strict_ready,
         phase3_strict_reason as _phase3_strict_reason,
     )
+    from openclaw_cron_contract import summarize_cron_jobs  # type: ignore
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -975,6 +977,7 @@ class ObservabilityExporter:
         primary_up = 1.0 if primary_status == "OK" else 0.0
         gateway_up = 1.0 if bool(payload.get("gateway_reachable")) else 0.0
         channels_latency_ms = float(payload.get("channels_status_elapsed_ms") or 0.0)
+        fallback_ready = payload.get("fallback_ready") if isinstance(payload.get("fallback_ready"), list) else []
 
         return {
             "status": "ok",
@@ -986,6 +989,7 @@ class ObservabilityExporter:
                 "primary_channel": primary_channel,
                 "primary_up": primary_up,
                 "channels_status_latency_ms": channels_latency_ms,
+                "fallback_ready_count": float(payload.get("fallback_ready_count") or len(fallback_ready)),
                 "recovery_mode": str(payload.get("recovery_mode") or "unknown"),
             },
             "sqlite": {
@@ -999,17 +1003,31 @@ class ObservabilityExporter:
         warnings: List[str] = []
         if err:
             warnings.append(err)
-            return {"jobs": []}, warnings
+            return {"jobs": [], "summary": summarize_cron_jobs({})}, warnings
 
         required_jobs_config, config_warnings = _load_required_cron_jobs_config(self.required_cron_jobs_path)
         warnings.extend(config_warnings)
         if not required_jobs_config:
-            return {"jobs": []}, warnings
+            return {"jobs": [], "summary": summarize_cron_jobs(payload)}, warnings
 
         jobs = payload.get("jobs", [])
         if not isinstance(jobs, list):
             warnings.append("invalid:jobs.json:jobs_not_list")
-            return {"jobs": []}, warnings
+            cron_summary = summarize_cron_jobs(payload)
+            warnings.append(
+                f"cron_invalid_session_target_count:{cron_summary.get('invalid_session_target_count', 0)}"
+            )
+            return {"jobs": [], "summary": cron_summary}, warnings
+
+        cron_summary = summarize_cron_jobs(payload)
+        if cron_summary.get("status") == "FAIL":
+            warnings.append(
+                f"cron_invalid_session_target_count:{cron_summary.get('invalid_session_target_count', 0)}"
+            )
+        elif cron_summary.get("status") == "WARN":
+            warnings.append(
+                f"cron_malformed_job_count:{cron_summary.get('malformed_job_count', 0)}"
+            )
 
         job_rows: List[Dict[str, Any]] = []
         cache = self._persisted_state.setdefault("cron_last_success_ms", {})
@@ -1085,7 +1103,7 @@ class ObservabilityExporter:
                     "freshness_lag_seconds": freshness_lag_seconds,
                 }
             )
-        return {"jobs": job_rows}, warnings
+        return {"jobs": job_rows, "summary": cron_summary}, warnings
 
     def _collect_heavy(self) -> Dict[str, Any]:
         now = self._now()
@@ -1286,6 +1304,12 @@ class ObservabilityExporter:
                 help_text="Latency of the latest openclaw channels.status call in milliseconds.",
                 labels={"channel": primary_channel},
             )
+            registry.add(
+                "pmx_openclaw_fallback_ready_count",
+                float(openclaw.get("fallback_ready_count") or 0.0),
+                help_text="Number of OpenClaw delivery channels reported as fallback-ready.",
+                labels={"component": "openclaw"},
+            )
             if openclaw.get("observed_unixtime") is not None:
                 registry.add(
                     "pmx_openclaw_health_observed_unixtime",
@@ -1358,6 +1382,38 @@ class ObservabilityExporter:
                     help_text="Seconds since the exporter last saw a successful run for the cron job.",
                     labels=labels,
                 )
+
+            cron_summary = cron_payload.get("summary", {}) if isinstance(cron_payload.get("summary"), dict) else {}
+            registry.add(
+                "pmx_openclaw_cron_jobs_total",
+                float(cron_summary.get("jobs_total") or 0.0),
+                help_text="Total number of cron jobs observed in the OpenClaw jobs file.",
+                labels={"component": "cron"},
+            )
+            registry.add(
+                "pmx_openclaw_cron_agent_turn_jobs_total",
+                float(cron_summary.get("agent_turn_jobs") or 0.0),
+                help_text="Total number of agentTurn cron jobs observed in the OpenClaw jobs file.",
+                labels={"component": "cron"},
+            )
+            registry.add(
+                "pmx_openclaw_cron_malformed_jobs_total",
+                float(cron_summary.get("malformed_job_count") or 0.0),
+                help_text="Total number of malformed cron jobs observed in the OpenClaw jobs file.",
+                labels={"component": "cron"},
+            )
+            registry.add(
+                "pmx_openclaw_cron_invalid_session_target_total",
+                float(cron_summary.get("invalid_session_target_count") or 0.0),
+                help_text="Total number of agentTurn cron jobs missing a valid sessionTarget.",
+                labels={"component": "cron"},
+            )
+            registry.add(
+                "pmx_openclaw_cron_delivery_fallback_ready_count",
+                float(cron_summary.get("delivery_fallback_ready_count") or 0.0),
+                help_text="Number of cron jobs with a configured delivery fallback channel.",
+                labels={"component": "cron"},
+            )
 
         heavy = snapshot.get("collectors", {}).get("heavy", {})
         if isinstance(heavy, dict):

@@ -11,8 +11,12 @@ def _script_text() -> str:
 
 def test_setup_openclaw_local_llm_uses_native_ollama_base_url() -> None:
     text = _script_text()
+    assert 'simpleTrader_env_win\\Scripts\\python.exe' in text
     assert '$resolvedOllamaHost = "http://127.0.0.1:11434"' in text
     assert "without `/v1`" in text
     assert 'if ($openclawOllamaBaseUrl.ToLower().EndsWith("/v1")) {' in text
     assert '$env:OPENCLAW_OLLAMA_BASE_URL = $openclawOllamaBaseUrl' in text
+    assert '$env:OPENCLAW_LOCAL_ONLY = "1"' in text
+    assert '$env:OPENCLAW_OLLAMA_MODEL_ORDER = "qwen3:8b,deepseek-r1:8b,deepseek-r1:32b"' in text
+    assert '--ollama-models "qwen3:8b,deepseek-r1:8b,deepseek-r1:32b" --sync-auth' in text
     assert '+ "/v1"' not in text

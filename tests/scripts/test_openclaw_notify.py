@@ -91,3 +91,38 @@ def test_main_prompt_mode_suppresses_verbose_tail_for_supervised_gateway_conflic
     assert "already running under supervision" in err
     assert "FAILED (exit=" not in err
     assert "stderr (tail)" not in err
+
+
+def test_main_prompt_mode_passes_trusted_high_risk_flag(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(on, "_write_run_log", lambda **kwargs: None)
+    monkeypatch.setattr(
+        oc,
+        "run_agent_turn",
+        lambda **kwargs: captured.update(kwargs) or OpenClawResult(
+            ok=True,
+            returncode=0,
+            command=["openclaw", "agent"],
+            stdout="",
+            stderr="",
+        ),
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "openclaw_notify.py",
+            "--prompt",
+            "--to",
+            "+15551234567",
+            "--message",
+            "hello",
+            "--approve-high-risk",
+            "--no-infer-to",
+        ],
+    )
+
+    rc = on.main()
+
+    assert rc == 0
+    assert captured["approve_high_risk"] is True

@@ -3,11 +3,29 @@ Param()
 $ErrorActionPreference = "Stop"
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-$pythonExe = if ($env:PMX_PYTHON_BIN -and (Test-Path $env:PMX_PYTHON_BIN)) {
-    $env:PMX_PYTHON_BIN
-} else {
-    "python"
+
+function Resolve-RepoPython {
+    param([Parameter(Mandatory = $true)][string]$RepoRoot)
+
+    if ($env:PMX_PYTHON_BIN -and (Test-Path -LiteralPath $env:PMX_PYTHON_BIN)) {
+        return $env:PMX_PYTHON_BIN
+    }
+
+    $candidates = @(
+        (Join-Path $RepoRoot "simpleTrader_env_win\Scripts\python.exe"),
+        (Join-Path $RepoRoot "simpleTrader_env\Scripts\python.exe"),
+        (Join-Path $RepoRoot "simpleTrader_env\bin\python")
+    )
+    foreach ($candidate in $candidates) {
+        if ($candidate -and (Test-Path -LiteralPath $candidate)) { return $candidate }
+    }
+
+    $cmd = Get-Command python -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+    return "python"
 }
+
+$pythonExe = Resolve-RepoPython -RepoRoot $repoRoot
 
 function Test-WslReady {
     try {

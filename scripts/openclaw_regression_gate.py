@@ -81,6 +81,67 @@ def _remote_workflow_health_check(*, python_bin: str, timeout_seconds: float) ->
     return _run(cmd, timeout_seconds=max(10.0, float(timeout_seconds)))
 
 
+def _soften_config_only_channels_probe(
+    *,
+    report: dict[str, Any],
+    status_res: _CmdResult,
+    python_bin: str,
+    timeout_seconds: float,
+) -> bool:
+    report["checks"]["channels_probe"]["stdout"] = "\n".join((status_res.stdout or "").splitlines()[-10:])
+    report["checks"]["channels_probe"]["stderr"] = "\n".join((status_res.stderr or "").splitlines()[-10:])
+    report["checks"]["channels_probe"]["softened"] = True
+
+    health_res = _remote_workflow_health_check(
+        python_bin=str(python_bin),
+        timeout_seconds=max(10.0, float(timeout_seconds)),
+    )
+    report["checks"]["remote_workflow_health"] = {
+        "ok": health_res.ok,
+        "returncode": health_res.returncode,
+        "command": health_res.command,
+    }
+    if not health_res.ok:
+        report["errors"].append("channels_probe_invalid_json")
+        report["errors"].append("remote_workflow_health_failed")
+        report["checks"]["remote_workflow_health"]["stderr"] = "\n".join((health_res.stderr or "").splitlines()[-10:])
+        report["checks"]["remote_workflow_health"]["stdout"] = "\n".join((health_res.stdout or "").splitlines()[-10:])
+        return False
+
+    try:
+        health_payload = _parse_json_best_effort(health_res.stdout)
+    except Exception:
+        report["errors"].append("channels_probe_invalid_json")
+        report["errors"].append("remote_workflow_health_invalid_json")
+        report["checks"]["remote_workflow_health"]["stdout"] = "\n".join((health_res.stdout or "").splitlines()[-10:])
+        return False
+    if not isinstance(health_payload, dict):
+        report["errors"].append("channels_probe_invalid_json")
+        report["errors"].append("remote_workflow_health_invalid_payload")
+        return False
+
+    softened = (
+        str(health_payload.get("overall") or "").strip().upper() == "OK"
+        and str(health_payload.get("primary_status") or "").strip().upper() == "OK"
+    )
+    report["checks"]["remote_workflow_health"]["payload"] = {
+        "overall": health_payload.get("overall"),
+        "primary_status": health_payload.get("primary_status"),
+        "recovery_mode": health_payload.get("recovery_mode"),
+    }
+    if not softened:
+        report["errors"].append("channels_probe_invalid_json")
+        report["errors"].append("remote_workflow_health_not_ready")
+        return False
+
+    report["warnings"].append("channels_probe_non_json_softened")
+    report["checks"]["primary_channel"] = {
+        "ok": True,
+        "reason": "channels_probe_non_json_softened",
+    }
+    return True
+
+
 def _run(cmd: list[str], *, timeout_seconds: float) -> _CmdResult:
     try:
         proc = subprocess.run(
@@ -161,70 +222,33 @@ def run_regression_gate(
         "returncode": status_res.returncode,
         "command": status_res.command,
     }
+    probe_text = "\n".join(text for text in (status_res.stdout, status_res.stderr) if text)
+    config_only_probe = _looks_like_config_only_channels_probe_output(probe_text)
 
     if status_res.returncode == 127 and allow_missing_openclaw:
         report["status"] = "SKIP"
         report["warnings"].append("openclaw_cli_missing")
         return True, report
 
-    if not status_res.ok:
+    if not status_res.ok and not config_only_probe:
         report["errors"].append("channels_probe_failed")
         report["checks"]["channels_probe"]["stderr"] = "\n".join((status_res.stderr or "").splitlines()[-10:])
         return False, report
 
-    try:
-        payload = _parse_json_best_effort(status_res.stdout)
-    except Exception:
-        report["checks"]["channels_probe"]["stdout"] = "\n".join((status_res.stdout or "").splitlines()[-10:])
-        if _looks_like_config_only_channels_probe_output(status_res.stdout):
-            health_res = _remote_workflow_health_check(
-                python_bin=str(python_bin),
-                timeout_seconds=max(10.0, float(timeout_seconds)),
-            )
-            report["checks"]["remote_workflow_health"] = {
-                "ok": health_res.ok,
-                "returncode": health_res.returncode,
-                "command": health_res.command,
-            }
-            if not health_res.ok:
-                report["errors"].append("channels_probe_invalid_json")
-                report["errors"].append("remote_workflow_health_failed")
-                report["checks"]["remote_workflow_health"]["stderr"] = "\n".join((health_res.stderr or "").splitlines()[-10:])
-                report["checks"]["remote_workflow_health"]["stdout"] = "\n".join((health_res.stdout or "").splitlines()[-10:])
-                return False, report
-            try:
-                health_payload = _parse_json_best_effort(health_res.stdout)
-            except Exception:
-                report["errors"].append("channels_probe_invalid_json")
-                report["errors"].append("remote_workflow_health_invalid_json")
-                report["checks"]["remote_workflow_health"]["stdout"] = "\n".join((health_res.stdout or "").splitlines()[-10:])
-                return False, report
-            if not isinstance(health_payload, dict):
-                report["errors"].append("channels_probe_invalid_json")
-                report["errors"].append("remote_workflow_health_invalid_payload")
-                return False, report
-
-            softened = (
-                str(health_payload.get("overall") or "").strip().upper() == "OK"
-                and str(health_payload.get("primary_status") or "").strip().upper() == "OK"
-            )
-            report["checks"]["remote_workflow_health"]["payload"] = {
-                "overall": health_payload.get("overall"),
-                "primary_status": health_payload.get("primary_status"),
-                "recovery_mode": health_payload.get("recovery_mode"),
-            }
-            if not softened:
-                report["errors"].append("channels_probe_invalid_json")
-                report["errors"].append("remote_workflow_health_not_ready")
-                return False, report
-
-            report["warnings"].append("channels_probe_non_json_softened")
-            report["checks"]["primary_channel"] = {
-                "ok": True,
-                "reason": "channels_probe_non_json_softened",
-            }
-            payload = None
-        else:
+    if config_only_probe:
+        if not _soften_config_only_channels_probe(
+            report=report,
+            status_res=status_res,
+            python_bin=str(python_bin),
+            timeout_seconds=max(10.0, float(timeout_seconds)),
+        ):
+            return False, report
+        payload = None
+    else:
+        try:
+            payload = _parse_json_best_effort(status_res.stdout)
+        except Exception:
+            report["checks"]["channels_probe"]["stdout"] = "\n".join((status_res.stdout or "").splitlines()[-10:])
             report["errors"].append("channels_probe_invalid_json")
             return False, report
 

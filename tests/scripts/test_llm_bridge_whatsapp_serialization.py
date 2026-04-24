@@ -30,6 +30,9 @@ class _DummyActivity:
     def log_orchestration(self, **kwargs) -> None:
         self.orchestrations.append(dict(kwargs))
 
+    def log_request(self, **kwargs) -> None:
+        self.events.append({"event_type": "request", "metadata": dict(kwargs)})
+
 
 def test_openclaw_bridge_forces_whatsapp_through_orchestrate(monkeypatch) -> None:
     activity = _DummyActivity()
@@ -265,3 +268,34 @@ def test_orchestrate_returns_tool_snapshot_when_followup_round_times_out(monkeyp
     assert "evidence-first snapshot" in result
     assert "check_system_health" in result
     assert delivered and "evidence-first snapshot" in delivered[-1]
+
+
+def test_run_reasoning_model_returns_health_evidence_when_all_models_fail(monkeypatch) -> None:
+    activity = _DummyActivity()
+    for spec in orch.MODEL_REGISTRY.values():
+        monkeypatch.setattr(spec, "available", True)
+        monkeypatch.setattr(spec, "error_streak", 0)
+        monkeypatch.setattr(spec, "cooldown_until", 0.0)
+
+    monkeypatch.setattr(orch, "_get_activity_logger", lambda: activity)
+    monkeypatch.setattr(orch, "_get_system_health_json", lambda: json.dumps({
+        "ollama_up": True,
+        "gateway_ok": False,
+        "profile": {"name": "builtin_default"},
+        "models": {
+            "qwen3:8b": {"available": True},
+            "deepseek-r1:8b": {"available": False},
+        },
+    }))
+    monkeypatch.setattr(orch, "_ollama_post", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("format")))
+
+    result = orch._run_reasoning_model(
+        model="deepseek-r1:8b",
+        task="System health check",
+        allow_fallback=True,
+        timeout_seconds=1.0,
+        max_predict=32,
+    )
+
+    assert "health: DEGRADED" in result
+    assert "gateway=down" in result

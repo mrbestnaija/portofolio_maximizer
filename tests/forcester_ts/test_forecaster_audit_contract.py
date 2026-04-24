@@ -151,6 +151,21 @@ def test_forecast_returns_written_audit_path(monkeypatch, tmp_path: Path) -> Non
     assert audit_path.name.startswith("forecast_audit_")
 
 
+def test_forecast_audit_includes_structured_evidence_health(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("TS_FORECAST_AUDIT_DIR", str(tmp_path))
+    forecaster = _minimal_forecaster()
+
+    result = forecaster.forecast(steps=2)
+
+    audit_path = Path(result["forecast_audit_path"])
+    payload = json.loads(audit_path.read_text(encoding="utf-8"))
+    evidence = payload["artifacts"]["evidence_health"]
+    assert "source_kind" in evidence
+    assert "freshness_status" in evidence
+    assert "rmse_rank_active" in evidence
+    assert "production_ok" in evidence
+
+
 def test_forecast_uses_unique_audit_paths_across_consecutive_writes(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("TS_FORECAST_AUDIT_DIR", str(tmp_path))
     forecaster = _minimal_forecaster()
@@ -286,6 +301,7 @@ def test_forecast_records_exog_policy_artifacts(monkeypatch) -> None:
 
 def _write_audit(audit_dir: Path, name: str, ticker: str, horizon: int) -> None:
     """Write a minimal audit file with evaluation_metrics for the given ticker/horizon."""
+    audit_dir.mkdir(parents=True, exist_ok=True)
     payload: Dict[str, Any] = {
         "dataset": {"ticker": ticker, "forecast_horizon": horizon, "length": 100},
         "artifacts": {
@@ -518,6 +534,10 @@ def test_build_ensemble_uses_trailing_oos_metrics_for_confidence_and_da(
         "samossa": 0.63,
         "garch": 0.51,
     }
+    health = result.get("metadata", {}).get("health", {})
+    assert health, "Expected ensemble health metadata in _build_ensemble output"
+    assert health.get("oos_evidence", {}).get("rmse_rank_active") is True
+    assert health.get("oos_evidence", {}).get("quality") in {"observed_oos", "proxy"}
 
 
 def test_build_ensemble_prefers_same_instance_latest_metrics_over_disk_metrics(
@@ -591,6 +611,9 @@ def test_build_ensemble_prefers_same_instance_latest_metrics_over_disk_metrics(
         "samossa": 0.61,
         "garch": 0.56,
     }
+    health = result.get("metadata", {}).get("health", {})
+    assert health.get("oos_evidence", {}).get("source_kind") == "latest_metrics"
+    assert health.get("oos_evidence", {}).get("rmse_rank_active") is True
 
 
 def test_load_trailing_oos_metrics_fails_closed_when_ticker_unknown(monkeypatch, tmp_path: Path) -> None:
@@ -764,6 +787,80 @@ def test_load_trailing_oos_metrics_finds_match_beyond_position_20(
     assert "samossa" in result, f"Expected samossa metrics in AAPL audit; got keys: {list(result)}"
 
 
+def test_load_trailing_oos_metrics_prefers_primary_dir_over_nearby_timestamps(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Primary production audits must win over near-equal research timestamps.
+
+    The production bug this guards against is a global mtime preference that can
+    accidentally select a research/ CV audit when NTFS timestamps are only a few
+    milliseconds apart. Directory priority must remain stronger than mtime.
+    """
+    import os
+    import time
+
+    production_dir = tmp_path / "production"
+    production_dir.mkdir()
+    research_dir = tmp_path / "research"
+    research_dir.mkdir()
+
+    production_path = production_dir / "forecast_audit_aapl_primary.json"
+    research_path = research_dir / "forecast_audit_aapl_research.json"
+
+    production_path.write_text(
+        json.dumps(
+            {
+                "dataset": {"ticker": "AAPL", "forecast_horizon": 30, "length": 100},
+                "artifacts": {
+                    "evaluation_metrics": {
+                        "samossa": {"rmse": 11.1, "directional_accuracy": 0.61, "n_observations": 30},
+                        "garch": {"rmse": 9.4, "directional_accuracy": 0.58, "n_observations": 30},
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    research_path.write_text(
+        json.dumps(
+            {
+                "dataset": {"ticker": "AAPL", "forecast_horizon": 30, "length": 100},
+                "artifacts": {
+                    "evaluation_metrics": {
+                        "samossa": {"rmse": 19.9, "directional_accuracy": 0.12, "n_observations": 30},
+                        "garch": {"rmse": 17.7, "directional_accuracy": 0.18, "n_observations": 30},
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    base = time.time()
+    os.utime(production_path, (base, base))
+    os.utime(research_path, (base + 0.007, base + 0.007))
+
+    monkeypatch.setenv("TS_FORECAST_AUDIT_DIR", str(production_dir))
+    config = TimeSeriesForecasterConfig(
+        sarimax_enabled=False,
+        garch_enabled=False,
+        samossa_enabled=False,
+        mssa_rl_enabled=False,
+        ensemble_enabled=False,
+    )
+    forecaster = TimeSeriesForecaster(config=config)
+    index = pd.date_range("2024-01-01", periods=60, freq="D")
+    forecaster.fit(pd.Series(list(range(60)), dtype=float, index=index), ticker="AAPL")
+    forecaster._instrumentation.set_dataset_metadata(forecast_horizon=30)
+
+    result = forecaster._load_trailing_oos_metrics()
+
+    assert result, "Expected production audit metrics when primary dir has the right ticker/horizon"
+    assert result["samossa"]["rmse"] == 11.1
+    assert forecaster._oos_selection_health.get("source_kind") == "disk_production"
+    assert Path(forecaster._oos_selection_health.get("source_path") or "").name == production_path.name
+
+
 def test_load_trailing_oos_metrics_warns_when_no_match(
     monkeypatch, tmp_path: Path, caplog: "pytest.LogCaptureFixture"
 ) -> None:
@@ -842,6 +939,8 @@ def test_load_trailing_oos_metrics_falls_back_to_production_eval_dir(
         "live auto_trader RMSE-rank is permanently dead without this"
     )
     assert "samossa" in result, f"Expected samossa metrics in result; got keys: {list(result)}"
+    assert forecaster._oos_selection_health.get("source_kind") == "disk_production_eval"
+    assert forecaster._oos_selection_health.get("quality") == "observed_oos"
 
 
 def test_load_trailing_oos_metrics_eval_dir_respects_ticker_scope(
@@ -873,3 +972,133 @@ def test_load_trailing_oos_metrics_eval_dir_respects_ticker_scope(
     assert result == {}, (
         "production_eval/ fallback must NOT return MSFT metrics when current ticker is AAPL"
     )
+    assert forecaster._oos_selection_health.get("source_kind") in {"no_match", "none", "blocked"}
+
+
+def test_load_trailing_oos_metrics_falls_back_to_research_dir(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Tertiary scan: when production/ and production_eval/ have no evaluation_metrics,
+    research/ (ETL/CV audit files) must be scanned.
+
+    Root cause of live RMSE-rank being dead: production/ and production_eval/ only
+    receive auto_trader audit files which never call evaluate() → no evaluation_metrics.
+    Only ETL/CV runs write evaluation_metrics, and those go to research/.
+    Without the research/ scan, RMSE-rank is permanently disabled in live mode and
+    confidence stays at heuristic baseline (~0.23-0.38, well below 0.55 gate threshold).
+    """
+    production_dir = tmp_path / "production"
+    production_dir.mkdir()
+    # production/ file: no evaluation_metrics (typical live auto_trader file)
+    no_metrics_audit = {
+        "dataset": {"ticker": "AAPL", "forecast_horizon": 30, "length": 100},
+        "artifacts": {},
+    }
+    (production_dir / "forecast_audit_live.json").write_text(json.dumps(no_metrics_audit))
+
+    # production_eval/ file: also no evaluation_metrics (RMSE_ONLY auto_trader sprint)
+    eval_dir = tmp_path / "production_eval"
+    eval_dir.mkdir()
+    (eval_dir / "forecast_audit_sprint.json").write_text(json.dumps(no_metrics_audit))
+
+    # research/ file: HAS evaluation_metrics (ETL CV run with --use-cv)
+    research_dir = tmp_path / "research"
+    research_dir.mkdir()
+    _write_audit(research_dir, "forecast_audit_etl_cv.json", "AAPL", 30)
+
+    monkeypatch.setenv("TS_FORECAST_AUDIT_DIR", str(production_dir))
+    config = TimeSeriesForecasterConfig(
+        sarimax_enabled=False, garch_enabled=False,
+        samossa_enabled=False, mssa_rl_enabled=False,
+        ensemble_enabled=False,
+    )
+    forecaster = TimeSeriesForecaster(config=config)
+    index = pd.date_range("2024-01-01", periods=60, freq="D")
+    forecaster.fit(pd.Series(list(range(60)), dtype=float, index=index), ticker="AAPL")
+    forecaster._instrumentation.set_dataset_metadata(forecast_horizon=30)
+
+    result = forecaster._load_trailing_oos_metrics()
+
+    assert result, (
+        "Tertiary research/ scan must find ETL/CV evaluation_metrics; "
+        "live RMSE-rank is permanently dead without this scan"
+    )
+    assert "samossa" in result, f"Expected samossa key from research/ metrics; got {list(result)}"
+    assert forecaster._oos_selection_health.get("source_kind") == "disk_research"
+    assert forecaster._oos_selection_health.get("quality") == "observed_oos"
+
+
+def test_oos_staleness_guard_rejects_stale_research_files(monkeypatch, tmp_path: Path) -> None:
+    """research/ files older than 30 days must be ignored; function returns {}.
+
+    Stale CV fold metrics from a prior market regime should not pollute live
+    RMSE-rank model selection. The staleness guard (max_age_sec=30*86400) was
+    added specifically for the research/ tertiary scan.
+    """
+    import os
+    import time
+
+    production_dir = tmp_path / "production"
+    production_dir.mkdir()
+
+    research_dir = tmp_path / "research"
+    research_dir.mkdir()
+    _write_audit(research_dir, "forecast_audit_old_cv.json", "AAPL", 30)
+
+    # Back-date the research/ file to 31 days ago
+    stale_path = research_dir / "forecast_audit_old_cv.json"
+    stale_mtime = time.time() - 31 * 86400
+    os.utime(stale_path, (stale_mtime, stale_mtime))
+
+    monkeypatch.setenv("TS_FORECAST_AUDIT_DIR", str(production_dir))
+    config = TimeSeriesForecasterConfig(
+        sarimax_enabled=False, garch_enabled=False,
+        samossa_enabled=False, mssa_rl_enabled=False,
+        ensemble_enabled=False,
+    )
+    forecaster = TimeSeriesForecaster(config=config)
+    index = pd.date_range("2024-01-01", periods=60, freq="D")
+    forecaster.fit(pd.Series(list(range(60)), dtype=float, index=index), ticker="AAPL")
+    forecaster._instrumentation.set_dataset_metadata(forecast_horizon=30)
+
+    result = forecaster._load_trailing_oos_metrics()
+
+    assert result == {} or result is None or not result, (
+        "Stale research/ files (>30 days) must be rejected; "
+        f"got {result}"
+    )
+    assert forecaster._oos_selection_health.get("quality") == "stale_rejected"
+
+
+def test_oos_staleness_guard_passes_fresh_research_files(monkeypatch, tmp_path: Path) -> None:
+    """research/ files within 30 days must be accepted normally.
+
+    Staleness guard should not block fresh CV metrics.
+    """
+    production_dir = tmp_path / "production"
+    production_dir.mkdir()
+
+    research_dir = tmp_path / "research"
+    research_dir.mkdir()
+    _write_audit(research_dir, "forecast_audit_fresh_cv.json", "AAPL", 30)
+    # mtime is current (just written) — well within 30-day window
+
+    monkeypatch.setenv("TS_FORECAST_AUDIT_DIR", str(production_dir))
+    config = TimeSeriesForecasterConfig(
+        sarimax_enabled=False, garch_enabled=False,
+        samossa_enabled=False, mssa_rl_enabled=False,
+        ensemble_enabled=False,
+    )
+    forecaster = TimeSeriesForecaster(config=config)
+    index = pd.date_range("2024-01-01", periods=60, freq="D")
+    forecaster.fit(pd.Series(list(range(60)), dtype=float, index=index), ticker="AAPL")
+    forecaster._instrumentation.set_dataset_metadata(forecast_horizon=30)
+
+    result = forecaster._load_trailing_oos_metrics()
+
+    assert result, (
+        "Fresh research/ files (< 30 days) must be accepted by staleness guard"
+    )
+    assert "samossa" in result, f"Expected samossa key; got {list(result)}"
+    assert forecaster._oos_selection_health.get("source_kind") == "disk_research"
+    assert forecaster._oos_selection_health.get("freshness_status") == "fresh"

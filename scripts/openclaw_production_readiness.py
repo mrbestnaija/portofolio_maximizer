@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 Local-only OpenClaw production-readiness snapshot for Portfolio Maximizer.
 
@@ -52,7 +52,6 @@ from utils.repo_python import resolve_repo_python
 
 
 FALSEY_ENV_VALUES = {"0", "false", "no", "off"}
-DEFAULT_APPROVAL_TOKEN = "PMX_APPROVE_HIGH_RISK"
 DEFAULT_GATE_ARTIFACT = PROJECT_ROOT / "logs" / "gate_status_latest.json"
 DEFAULT_PRODUCTION_GATE_ARTIFACT = PROJECT_ROOT / "logs" / "audit_gate" / "production_gate_latest.json"
 DEFAULT_GATE_DECOMPOSITION_ARTIFACT = PROJECT_ROOT / "logs" / "audit_gate" / "production_gate_decomposition_latest.json"
@@ -105,9 +104,18 @@ def _env_enabled(name: str, *, default: bool) -> bool:
     return raw not in FALSEY_ENV_VALUES
 
 
-def _approval_token_value() -> str:
-    token = str(os.getenv("OPENCLAW_AUTONOMY_APPROVAL_TOKEN", "")).strip()
-    return token or DEFAULT_APPROVAL_TOKEN
+def _legacy_autonomy_envs() -> list[str]:
+    names = (
+        "OPENCLAW_AUTONOMY_REQUIRE_APPROVAL_TOKEN",
+        "OPENCLAW_AUTONOMY_APPROVAL_TOKEN",
+        "OPENCLAW_AUTONOMY_POLICY_PREFIX_ENABLED",
+    )
+    rows: list[str] = []
+    for name in names:
+        raw = str(os.getenv(name, "")).strip()
+        if raw:
+            rows.append(name)
+    return rows
 
 
 def _issue(*, source: str, code: str, detail: str) -> dict[str, str]:
@@ -661,23 +669,20 @@ def _openclaw_model_posture(config_path: Path) -> tuple[dict[str, Any], list[dic
 
 
 def _security_posture() -> tuple[dict[str, Any], list[dict[str, str]], list[dict[str, str]]]:
-    approval_token = _approval_token_value()
     autonomy_guard_enabled = _env_enabled("OPENCLAW_AUTONOMY_GUARD_ENABLED", default=True)
-    approval_required = _env_enabled("OPENCLAW_AUTONOMY_REQUIRE_APPROVAL_TOKEN", default=True)
+    trusted_high_risk_approval_enabled = _env_enabled("OPENCLAW_APPROVE_HIGH_RISK", default=False)
     injection_block_enabled = _env_enabled("OPENCLAW_AUTONOMY_BLOCK_INJECTION_PATTERNS", default=True)
-    policy_prefix_enabled = _env_enabled("OPENCLAW_AUTONOMY_POLICY_PREFIX_ENABLED", default=True)
+    policy_prefix_enabled = True
     runtime_pip_enabled = _env_enabled("PMX_ALLOW_RUNTIME_PIP_INSTALL", default=False)
-    non_default_approval_token_configured = bool(
-        approval_token and approval_token != DEFAULT_APPROVAL_TOKEN
-    )
+    legacy_autonomy_envs = _legacy_autonomy_envs()
 
     snapshot = {
         "autonomy_guard_enabled": autonomy_guard_enabled,
-        "approval_token_required": approval_required,
+        "trusted_high_risk_approval_enabled": trusted_high_risk_approval_enabled,
         "prompt_injection_block_enabled": injection_block_enabled,
         "policy_prefix_enabled": policy_prefix_enabled,
         "runtime_pip_install_enabled": runtime_pip_enabled,
-        "non_default_approval_token_configured": non_default_approval_token_configured,
+        "legacy_autonomy_env_count": len(legacy_autonomy_envs),
     }
     blockers: list[dict[str, str]] = []
     warnings: list[dict[str, str]] = []
@@ -688,14 +693,6 @@ def _security_posture() -> tuple[dict[str, Any], list[dict[str, str]], list[dict
                 source="security",
                 code="autonomy_guard_disabled",
                 detail="OPENCLAW_AUTONOMY_GUARD_ENABLED is disabled.",
-            )
-        )
-    if not approval_required:
-        blockers.append(
-            _issue(
-                source="security",
-                code="approval_token_not_required",
-                detail="OPENCLAW_AUTONOMY_REQUIRE_APPROVAL_TOKEN is disabled.",
             )
         )
     if not injection_block_enabled:
@@ -714,20 +711,17 @@ def _security_posture() -> tuple[dict[str, Any], list[dict[str, str]], list[dict
                 detail="PMX_ALLOW_RUNTIME_PIP_INSTALL is enabled, which weakens unattended production hardening.",
             )
         )
-    if approval_required and not non_default_approval_token_configured:
-        blockers.append(
-            _issue(
-                source="security",
-                code="weak_approval_token",
-                detail="OPENCLAW_AUTONOMY_APPROVAL_TOKEN is unset or still using the default token.",
-            )
-        )
-    if not policy_prefix_enabled:
+    if legacy_autonomy_envs:
+        legacy_names = ", ".join(legacy_autonomy_envs)
         warnings.append(
             _issue(
                 source="security",
-                code="policy_prefix_disabled",
-                detail="OPENCLAW_AUTONOMY_POLICY_PREFIX_ENABLED is disabled.",
+                code="legacy_autonomy_envs_ignored",
+                detail=(
+                    "Legacy OpenClaw autonomy env vars are ignored by the current runtime: "
+                    f"{legacy_names}. Use OPENCLAW_APPROVE_HIGH_RISK or --approve-high-risk for a trusted run; "
+                    "the policy prefix is always canonical."
+                ),
             )
         )
 
@@ -987,25 +981,26 @@ def _build_human_action_guides(
             return
         guides.append(guide)
 
-    if "weak_approval_token" in codes:
+    if "legacy_autonomy_envs_ignored" in codes:
         add(
             {
-                "id": "approval_token",
-                "title": "Set a non-default approval token",
+                "id": "approval_boundary",
+                "title": "Remove legacy autonomy env vars",
                 "owner": "human",
                 "can_auto_fix": False,
-                "why_blocked": "Unattended OpenClaw turns are still using the default approval token.",
+                "why_blocked": "Legacy autonomy env vars are still present and the runtime now ignores them.",
                 "steps": [
-                    "Choose a strong random token and store it outside the repo.",
-                    "Set OPENCLAW_AUTONOMY_APPROVAL_TOKEN in the shell or service environment that launches OpenClaw.",
-                    "Rerun the readiness snapshot to verify the blocker clears.",
+                    "Remove OPENCLAW_AUTONOMY_REQUIRE_APPROVAL_TOKEN, OPENCLAW_AUTONOMY_APPROVAL_TOKEN, and OPENCLAW_AUTONOMY_POLICY_PREFIX_ENABLED from the launch environment.",
+                    "Use OPENCLAW_APPROVE_HIGH_RISK=1 or --approve-high-risk only for the specific run that needs trusted approval.",
+                    "Rerun the readiness snapshot to verify the warning clears.",
                 ],
                 "commands": [
-                    "$env:OPENCLAW_AUTONOMY_APPROVAL_TOKEN='<strong-random-token>'",
+                    "Remove-Item Env:OPENCLAW_AUTONOMY_REQUIRE_APPROVAL_TOKEN,Env:OPENCLAW_AUTONOMY_APPROVAL_TOKEN,Env:OPENCLAW_AUTONOMY_POLICY_PREFIX_ENABLED",
+                    "$env:OPENCLAW_APPROVE_HIGH_RISK='1'",
                     "python scripts/openclaw_production_readiness.py --json",
                     "python scripts/openclaw_ops_control_plane.py status --json",
                 ],
-                "cli_hint": "python scripts/openclaw_production_readiness.py --action-guide approval_token",
+                "cli_hint": "python scripts/openclaw_production_readiness.py --action-guide approval_boundary",
             }
         )
 
@@ -1083,18 +1078,16 @@ def _recommendations_for_issues(blockers: list[dict[str, str]], warnings: list[d
         add("Keep OpenClaw local-only and re-apply the model chain with `python scripts/openclaw_models.py apply`; ensure `qwen3:8b` is available in Ollama.")
     if codes & {
         "autonomy_guard_disabled",
-        "approval_token_not_required",
         "prompt_injection_block_disabled",
-        "weak_approval_token",
         "runtime_pip_install_enabled",
     }:
         add(
             "Harden unattended execution: set `OPENCLAW_AUTONOMY_GUARD_ENABLED=1`, "
-            "`OPENCLAW_AUTONOMY_REQUIRE_APPROVAL_TOKEN=1`, "
             "`OPENCLAW_AUTONOMY_BLOCK_INJECTION_PATTERNS=1`, "
-            "use a non-default `OPENCLAW_AUTONOMY_APPROVAL_TOKEN`, and keep `PMX_ALLOW_RUNTIME_PIP_INSTALL=0`."
+            "use `--approve-high-risk` or `OPENCLAW_APPROVE_HIGH_RISK=1` only for specific trusted runs, "
+            "and keep `PMX_ALLOW_RUNTIME_PIP_INSTALL=0`."
         )
-        add("Show the exact human steps with `python scripts/openclaw_production_readiness.py --action-guide approval_token`.")
+        add("Show the exact human steps with `python scripts/openclaw_production_readiness.py --action-guide approval_boundary`.")
     if codes & {"openclaw_regression_failed", "openclaw_cli_missing"}:
         add("Validate messaging health with `python scripts/openclaw_regression_gate.py --json` and repair channels via `python scripts/openclaw_maintenance.py --strict`.")
     if codes & {"gate_skip_policy_failed", "stale_gate_artifact_phase3_drift"}:
@@ -1318,7 +1311,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument(
         "--action-guide",
         default="",
-        help="Show a human-action guide for unresolved blockers: approval_token, canonical_gate_truth, capital_readiness, or all.",
+        help="Show a human-action guide for unresolved blockers: approval_boundary, canonical_gate_truth, capital_readiness, or all.",
     )
     parser.add_argument(
         "--json",

@@ -78,6 +78,7 @@ def _summarize_forecaster_health(
     wr = (metrics.get("win_rate"), status.get("win_rate_ok"))
     rm = metrics.get("rmse") or {}
     rm_status = status.get("rmse_ok")
+    evidence = fh.get("evidence_health") or {}
 
     print("  Metrics:")
     print(f"    profit_factor : {pf[0]!r}  ok={pf[1]!r}")
@@ -86,6 +87,79 @@ def _summarize_forecaster_health(
         f"    rmse          : ensemble={rm.get('ensemble')!r}, "
         f"baseline={rm.get('baseline')!r}, ratio={rm.get('ratio')!r}  ok={rm_status!r}"
     )
+    if evidence:
+        print("  Evidence:")
+        print(
+            f"    source_kind={evidence.get('source_kind')!r} "
+            f"freshness={evidence.get('freshness_status')!r} "
+            f"oos_available={evidence.get('oos_metrics_available')!r} "
+            f"rmse_rank_active={evidence.get('rmse_rank_active')!r}"
+        )
+        print(
+            f"    fallback_class={evidence.get('fallback_class')!r} "
+            f"production_ok={evidence.get('production_ok')!r}"
+        )
+
+
+def _summarize_orchestration_health(payload: Dict[str, Any]) -> None:
+    health = payload.get("orchestration_health") or {}
+    summary = health.get("summary") or {}
+    latest = health.get("latest") or {}
+    issues = health.get("issues") or []
+
+    print("\n=== Orchestration Health (run-level) ===")
+    if not health:
+        print("  (no orchestration_health block in dashboard JSON)")
+        return
+
+    print(f"  Status   : {str(health.get('status') or 'UNKNOWN').upper()}")
+    print("  Summary  :")
+    print(
+        f"    snapshots={summary.get('snapshots')!r}  "
+        f"oos_sources={summary.get('oos_source_counts')!r}"
+    )
+    print(
+        f"    mssa_white_noise_failures={summary.get('mssa_white_noise_failures')!r}  "
+        f"garch_unstable_runs={summary.get('garch_unstable_runs')!r}  "
+        f"rmse_rank_active_runs={summary.get('rmse_rank_active_runs')!r}"
+    )
+    print(
+        f"  Latest   : source={latest.get('oos_source')!r} quality={latest.get('oos_quality')!r} "
+        f"mssa={latest.get('mssa_eligible')!r}/{latest.get('mssa_white_noise')!r} "
+        f"garch={latest.get('garch_fallback_mode')!r}/{latest.get('garch_unstable')!r}"
+    )
+    if issues:
+        print(f"  Issues   : {issues!r}")
+
+
+def _summarize_preprocess_health(payload: Dict[str, Any]) -> None:
+    health = payload.get("preprocess_health") or {}
+    summary = health.get("summary") or {}
+    latest = health.get("latest") or {}
+    issues = health.get("issues") or []
+
+    print("\n=== Preprocess Health (run-level) ===")
+    if not health:
+        print("  (no preprocess_health block in dashboard JSON)")
+        return
+
+    print(f"  Status   : {str(health.get('status') or 'UNKNOWN').upper()}")
+    print("  Summary  :")
+    print(
+        f"    snapshots={summary.get('snapshots')!r}  "
+        f"status_counts={summary.get('status_counts')!r}"
+    )
+    print(
+        f"    quality_tag_counts={summary.get('quality_tag_counts')!r}  "
+        f"production_ok_runs={summary.get('production_ok_runs')!r}  "
+        f"research_only_runs={summary.get('research_only_runs')!r}"
+    )
+    print(
+        f"  Latest   : status={latest.get('status')!r} tag={latest.get('quality_tag')!r} "
+        f"imputed={latest.get('imputed_fraction')!r} padding={latest.get('padding_fraction')!r}"
+    )
+    if issues:
+        print(f"  Issues   : {issues!r}")
 
 
 def _summarize_tickers(
@@ -201,6 +275,8 @@ def main() -> None:
     print(f"  cycles  : {meta.get('cycles')}")
 
     _summarize_forecaster_health(payload)
+    _summarize_orchestration_health(payload)
+    _summarize_preprocess_health(payload)
     _summarize_tickers(payload, monitoring_cfg)
 
 

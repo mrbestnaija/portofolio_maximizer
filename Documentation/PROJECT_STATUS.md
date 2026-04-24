@@ -1,10 +1,10 @@
 # Project Status - Portfolio Maximizer
 
-**Last verified (focused)**: 2026-04-12
+**Last verified (focused)**: 2026-04-18
 **Last full-suite**: 2026-04-11
 **Dependency sanity check**: 2026-01-04
 **Scope**: Engineering/integration health + paper-window MVS validation (not live profitability)
-**Document updated**: 2026-04-12
+**Document updated**: 2026-04-18
 
 ## Delta (2026-04-08)
 
@@ -12,11 +12,28 @@
 - Implemented documentation rule: **Barbell asymmetry is the primary economic objective. The system optimizes for asymmetric upside with bounded downside, not for symmetric textbook efficiency metrics.**
 - Older sections in this file remain useful evidence, but when they describe Sharpe, win rate, or generic forecast neatness as the primary goal, treat that wording as historical context rather than the current repo-wide default.
 
-## Delta (2026-04-12)
+## Delta (2026-04-18)
 
-- Latest unattended gate snapshot is materially cleaner, but not genuinely green end-to-end: `ci_integrity_gate`, `check_quant_validation_health`, `production_audit_gate`, and `production_gate_schema` are green, while `institutional_unattended_gate` still fails because `WARMUP_COVERED_PASS` is not accepted as unattended-ready.
-- The earlier cross-mode contamination blocker is cleared in the current snapshot, and quant-validation health is GREEN with `728 PASS / 0 FAIL`.
-- Treat the current warmup-covered posture as an operational improvement, not as proof that the repo now passes on its own merit.
+- Latest unattended gate snapshot is not genuinely green end-to-end: `production_audit_gate` currently reports `gate_semantics=PASS` but `posture=FAIL` because of `EVIDENCE_HYGIENE_FAIL` on the current workspace snapshot, and `institutional_unattended_gate` still blocks unattended claims.
+- The current blocker is evidence hygiene, not a threshold dodge; treat any warmup-covered wording in older notes as historical context only.
+- Repo-wide evidence-first alpha pipeline is now documented in `Documentation/EVIDENCE_FIRST_ALPHA_PIPELINE_2026-04-18.md`.
+- Weak-ticker rotation and NAV rebalance plan is now documented in `Documentation/WEAK_TICKER_ROTATION_AND_NAV_REBALANCE_PLAN_2026-04-18.md`.
+- Verified evidence/preprocess contract slice: `159 passed`.
+- Verified repo fast lane: `2534 passed, 6 skipped, 45 deselected, 11 xfailed`.
+
+## Delta (2026-04-22)
+
+- Live-funnel lineage continuity is now preserved end-to-end: `TimeSeriesSignal -> UnifiedSignal -> legacy dict -> PaperTradingEngine -> trade_executions -> trading_signals` keeps `ts_signal_id` intact, while integer `signal_id` remains reserved for LLM/FK use only.
+- `DatabaseManager.save_trading_signal()` now persists `trading_signals.ts_signal_id` and auto-migrates legacy schemas that predate the column, so signal archives remain attributable across restarts instead of losing lineage in the handoff layer.
+- This is a structural evidence-persistence fix, not a threshold or gate change.
+- Verified regression lanes: targeted lineage suite `52 passed`; repo fast lane `2681 selected` with no failures.
+
+## Delta (2026-04-22, rolling sleeve governance)
+
+- Ticker eligibility, sleeve summarization, and NAV promotion now use rolling evidence windows over `production_closed_trades`, so weak names can be re-admitted when fresh closed-trade evidence recovers instead of being permanently culled by one short sample.
+- `evaluate_sleeve_promotions.py` now emits explicit `PROMOTE` / `DEMOTE` / `HOLD` actions, which keeps the warmup-bridge state visible without letting it masquerade as a genuine pass.
+- NAV rebalance planning now carries the eligibility and sleeve windows forward as evidence-contract metadata, so downstream allocation artifacts can distinguish rolling proof from lifetime history.
+- Verified regression lanes for the rolling-window sweep: targeted sleeve/eligibility tests passed and the repo fast lane remained green.
 
 ## Phase 7.32 — Adversarial Hardening Round 2 (2026-03-02)
 

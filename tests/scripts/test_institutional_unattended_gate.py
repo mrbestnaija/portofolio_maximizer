@@ -146,3 +146,99 @@ def test_phase_p4_reports_latest_artifact_warmup_covered_blocker_semantically(mo
     assert findings[0].status == "FAIL"
     assert "Latest gate artifact" in findings[0].detail
     assert "WARMUP_COVERED_PASS" in findings[0].detail
+
+
+def test_phase_p5_emission_error_fails_before_schema_gate(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(mod, "ROOT", tmp_path)
+    snapshot = tmp_path / "logs" / "canonical_snapshot_latest.json"
+    snapshot.parent.mkdir(parents=True, exist_ok=True)
+    snapshot.write_text(
+        json.dumps(
+            {
+                "schema_version": 4,
+                "emission_error": "canonical_source_registry.yml not found at /tmp/config/canonical_source_registry.yml",
+                "gate": {
+                    "freshness_status": {"status": "fresh"},
+                    "warmup_state": {"posture": "expired", "deadline_utc": "2026-04-24T20:00:00Z", "matched_needed": 0},
+                    "trajectory_alarm": {"active": False},
+                },
+                "summary": {
+                    "evidence_health": "clean",
+                    "roi_ann_pct": 9.86,
+                    "objective_valid": True,
+                },
+                "source_contract": {
+                    "status": "clean",
+                    "canonical_sources": [],
+                    "allowlisted_readers": [],
+                    "violations_found": [],
+                    "scan_timestamp_utc": "2026-04-18T12:00:00Z",
+                },
+                "alpha_objective": {"objective_valid": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(mod, "DEFAULT_CANONICAL_SNAPSHOT_PATH", snapshot)
+
+    findings = mod._phase_p5_canonical_snapshot_contract()
+    assert findings
+    assert findings[0].status == "FAIL"
+    assert "emission_error=" in findings[0].detail
+    assert "schema_version=0" not in findings[0].detail
+
+
+def test_phase_p5_coverage_ratio_alarm_is_advisory_only(monkeypatch, tmp_path) -> None:
+    """coverage_ratio_alarm is advisory-only and must NOT cause P5 to FAIL.
+
+    Before this change, coverage_ratio_alarm duplicated the matched<10 gate blocker.
+    Now it is purely informational — the unattended gate already fails on matched<10.
+    """
+    monkeypatch.setattr(mod, "ROOT", tmp_path)
+    snapshot = tmp_path / "logs" / "canonical_snapshot_latest.json"
+    snapshot.parent.mkdir(parents=True, exist_ok=True)
+    snapshot.write_text(
+        json.dumps(
+            {
+                "schema_version": 4,
+                "gate": {
+                    "freshness_status": {"status": "fresh"},
+                    "warmup_state": {"posture": "genuine_pass", "deadline_utc": "2026-04-24T20:00:00Z", "matched_needed": 0},
+                    "trajectory_alarm": {"active": False},
+                    "coverage_ratio_alarm": {
+                        "active": True,
+                        "severity": "critical",
+                        "ratio": 0.074,
+                        "warn_threshold": 1.0,
+                        "critical_threshold": 0.25,
+                        "expected_closes_remaining": 0.662,
+                        "matched_needed": 9,
+                        "shortfall": 8.338,
+                    },
+                    "post_deadline_time_to_10_estimate": {"status": "inactive", "estimated_days": None},
+                },
+                "summary": {
+                    "evidence_health": "clean",
+                    "roi_ann_pct": 9.86,
+                    "objective_valid": True,
+                    "unattended_gate": "PASS",
+                },
+                "source_contract": {
+                    "status": "clean",
+                    "canonical_sources": [],
+                    "allowlisted_readers": [],
+                    "violations_found": [],
+                    "scan_timestamp_utc": "2026-04-18T12:00:00Z",
+                },
+                "alpha_objective": {"objective_valid": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(mod, "DEFAULT_CANONICAL_SNAPSHOT_PATH", snapshot)
+
+    findings = mod._phase_p5_canonical_snapshot_contract()
+    assert findings
+    # coverage_ratio_alarm active=True must NOT cause FAIL — it is advisory-only
+    assert findings[0].status == "PASS"
+    assert "coverage_ratio_alarm_active" not in findings[0].detail

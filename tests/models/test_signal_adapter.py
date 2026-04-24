@@ -34,7 +34,8 @@ def sample_ts_signal():
         reasoning='Time Series forecast indicates bullish trend',
         provenance={'model_type': 'TIME_SERIES_ENSEMBLE'},
         signal_type='TIME_SERIES',
-        volatility=0.20
+        volatility=0.20,
+        signal_id='ts_AAPL_fixture_0001'
     )
 
 
@@ -71,6 +72,7 @@ class TestSignalAdapter:
         assert unified.stop_loss == 95.0
         assert unified.expected_return == 0.10
         assert unified.risk_score == 0.5
+        assert unified.ts_signal_id == 'ts_AAPL_fixture_0001'
 
     def test_from_llm_signal(self, sample_llm_signal_dict):
         """Test converting LLM signal to UnifiedSignal"""
@@ -96,6 +98,7 @@ class TestSignalAdapter:
         assert legacy_dict['confidence'] == 0.75
         assert legacy_dict['entry_price'] == 100.0
         assert legacy_dict['source'] == 'TIME_SERIES'
+        assert legacy_dict['ts_signal_id'] == 'ts_AAPL_fixture_0001'
         assert 'target_price' in legacy_dict
         assert 'stop_loss' in legacy_dict
         assert 'expected_return' in legacy_dict
@@ -106,6 +109,7 @@ class TestSignalAdapter:
 
         assert isinstance(unified, UnifiedSignal)
         assert unified.source == 'TIME_SERIES'
+        assert unified.ts_signal_id == 'ts_AAPL_fixture_0001'
 
     def test_normalize_llm_signal_dict(self, sample_llm_signal_dict):
         """Test normalizing LLM signal dict"""

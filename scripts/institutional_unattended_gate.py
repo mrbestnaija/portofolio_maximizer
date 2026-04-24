@@ -22,6 +22,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+DEFAULT_CANONICAL_SNAPSHOT_PATH = ROOT / "logs" / "canonical_snapshot_latest.json"
+
 
 @dataclass
 class Finding:
@@ -41,6 +43,16 @@ class Finding:
 
 def _read(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8", errors="replace")
+
+
+def _load_json(path: Path) -> tuple[dict, str | None]:
+    if not path.exists():
+        return {}, f"missing:{path.name}"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {}, f"unreadable:{path.name}:{exc}"
+    return (payload if isinstance(payload, dict) else {}, None if isinstance(payload, dict) else f"invalid:{path.name}:root_not_object")
 
 
 def _has_all(text: str, needles: Iterable[str]) -> bool:
@@ -357,6 +369,76 @@ def _phase_p4_prior_gate_verification() -> List[Finding]:
     return out
 
 
+def _phase_p5_canonical_snapshot_contract() -> List[Finding]:
+    out: List[Finding] = []
+    payload, err = _load_json(DEFAULT_CANONICAL_SNAPSHOT_PATH)
+    if err:
+        out.append(
+            Finding(
+                "P5",
+                "canonical_snapshot_contract",
+                "FAIL",
+                f"Canonical snapshot unreadable: {err}.",
+            )
+        )
+        return out
+
+    emission_error = str(payload.get("emission_error") or "").strip()
+    schema_version = int(payload.get("schema_version") or 0) if payload else 0
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    gate = payload.get("gate") if isinstance(payload.get("gate"), dict) else {}
+    alpha = payload.get("alpha_objective") if isinstance(payload.get("alpha_objective"), dict) else {}
+    freshness = gate.get("freshness_status") if isinstance(gate.get("freshness_status"), dict) else {}
+    warmup = gate.get("warmup_state") if isinstance(gate.get("warmup_state"), dict) else {}
+    source_contract = payload.get("source_contract") if isinstance(payload.get("source_contract"), dict) else {}
+    trajectory_alarm = gate.get("trajectory_alarm") if isinstance(gate.get("trajectory_alarm"), dict) else {}
+
+    detail_bits: list[str] = []
+    if emission_error:
+        detail_bits.append(f"emission_error={emission_error}")
+    if schema_version == 0:
+        detail_bits.append("schema_version=0")
+    elif schema_version < 4:
+        detail_bits.append(f"schema_version={schema_version}")
+    freshness_status = str(freshness.get("status") or "").strip().lower()
+    if freshness_status != "fresh":
+        detail_bits.append(f"freshness={freshness_status or 'missing'}")
+    if str(source_contract.get("status") or "").strip().lower() != "clean":
+        detail_bits.append(f"source_contract={source_contract.get('status') or 'missing'}")
+    if str(summary.get("evidence_health") or "").strip().lower() != "clean":
+        detail_bits.append(f"evidence_health={summary.get('evidence_health') or 'missing'}")
+    if not bool(alpha.get("objective_valid", False)):
+        detail_bits.append("objective_valid=false")
+    if str(warmup.get("posture") or "").strip().lower() == "active":
+        detail_bits.append("warmup_bridge_state")
+    if str(summary.get("evidence_health") or "").strip().lower() == "warmup_expired_fail":
+        detail_bits.append("warmup_expired_fail")
+    if bool(trajectory_alarm.get("active")):
+        detail_bits.append("trajectory_alarm_active")
+    # coverage_ratio_alarm is advisory-only: matched<10 already causes FAIL via
+    # unattended_gate FAIL path; adding it here duplicates that signal with noise.
+
+    if detail_bits:
+        out.append(
+            Finding(
+                "P5",
+                "canonical_snapshot_contract",
+                "FAIL",
+                "Canonical snapshot not unattended-ready: " + "; ".join(detail_bits),
+            )
+        )
+    else:
+        out.append(
+            Finding(
+                "P5",
+                "canonical_snapshot_contract",
+                "PASS",
+                f"Canonical snapshot schema v{schema_version} is clean and unattended-ready.",
+            )
+        )
+    return out
+
+
 def run_gate() -> List[Finding]:
     findings: List[Finding] = []
     findings.extend(_phase_p0_security())
@@ -364,6 +446,7 @@ def run_gate() -> List[Finding]:
     findings.extend(_phase_p2_platt_data())
     findings.extend(_phase_p3_repo_hygiene())
     findings.extend(_phase_p4_prior_gate_verification())
+    findings.extend(_phase_p5_canonical_snapshot_contract())
     return findings
 
 

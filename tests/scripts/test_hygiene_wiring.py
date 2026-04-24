@@ -32,6 +32,7 @@ from scripts.run_auto_trader import (  # noqa: E402
     _attach_signal_context_to_forecast_audit,
     _build_cohort_identity,
     _build_semantic_admission,
+    _coerce_open_position_shares,
     _execute_signal,
 )
 
@@ -338,6 +339,35 @@ class TestSemanticAdmission:
         assert admission["reason_code"] == "NON_POSITIVE_NET_EDGE"
         assert admission["reason_codes"] == ["NON_POSITIVE_NET_EDGE"]
 
+    def test_quarantined_cycle_is_not_gate_eligible(self, tmp_path: Path) -> None:
+        audit_file = tmp_path / "production" / "forecast_audit_20260309_000003_semantic.json"
+        audit_file.parent.mkdir(parents=True, exist_ok=True)
+        audit_file.write_text(json.dumps(_make_audit_payload()), encoding="utf-8")
+
+        cohort_identity = _build_cohort_identity(audit_file)
+        admission = _build_semantic_admission(
+            audit_path=audit_file,
+            signal_context={
+                "context_type": "TRADE",
+                "event_type": "TRADE_FORECAST_AUDIT",
+                "ts_signal_id": "ts_AAPL_20260101_0004",
+                "ticker": "AAPL",
+                "run_id": "20260101_000000",
+                "entry_ts": "2026-01-01T00:00:00+00:00",
+                "expected_close_ts": "2026-01-31T00:00:00+00:00",
+                "forecast_horizon": 30,
+                "quarantined": True,
+            },
+            audit_id="audit_4",
+            cohort_identity=cohort_identity,
+        )
+
+        assert admission["gate_eligible"] is False
+        assert admission["gate_bucket"] == "QUARANTINED"
+        assert admission["quarantined"] is True
+        assert admission["not_quarantined"] is False
+        assert "QUARANTINED" in admission["reason_codes"]
+
     def test_attach_signal_context_persists_execution_policy_block_decision(self, tmp_path: Path) -> None:
         audit_file = tmp_path / "production" / "forecast_audit_20260310_000000_execgate.json"
         audit_file.parent.mkdir(parents=True, exist_ok=True)
@@ -427,6 +457,107 @@ def test_execute_signal_returns_auditable_preorder_block(monkeypatch) -> None:
     assert result["execution_policy_blocked"] is True
     assert result["admission_override_reason_codes"] == ["NON_POSITIVE_NET_EDGE"]
     assert result["evidence_source_classification"] == "producer-native"
+
+
+def test_execute_signal_quarantines_new_buys_but_allows_close_side(monkeypatch) -> None:
+    class _Trade:
+        def __init__(self, action: str) -> None:
+            self.timestamp = pd.Timestamp("2026-04-21T10:00:00Z")
+            self.entry_price = 100.0
+            self.action = action
+            self.realized_pnl = 12.5
+            self.realized_pnl_pct = 0.125
+            self.is_forced_exit = 0
+            self.is_contaminated = 0
+            self.is_synthetic = 0
+            self.is_diagnostic = 0
+            self.execution_mode = "live"
+            self.shares = 1
+            self.exit_reason = "TAKE_PROFIT"
+
+    class _Result:
+        def __init__(self, action: str) -> None:
+            self.status = "EXECUTED"
+            self.reason = None
+            self.trade = _Trade(action)
+            self.portfolio = MagicMock(total_value=1000.0)
+            self.validation_warnings = []
+
+    class _Bundle:
+        def __init__(self, action: str) -> None:
+            self.primary_signal = {
+                "signal_id": f"sig-{action.lower()}",
+                "ts_signal_id": f"sig-{action.lower()}",
+                "action": action,
+                "confidence": 0.82,
+                "expected_return": 0.004,
+                "net_trade_return": 0.002,
+                "roundtrip_cost_fraction": 0.002,
+                "signal_to_noise": 2.1,
+                "source": "TIME_SERIES",
+            }
+
+    market_data = pd.DataFrame({"High": [101.0, 102.0, 103.0], "Low": [99.0, 100.0, 101.0], "Close": [100.0, 101.0, 102.0]})
+
+    # BUY is quarantined and must not reach the execution engine.
+    router_buy = MagicMock()
+    router_buy.route_signal.return_value = _Bundle("BUY")
+    trading_engine_buy = MagicMock()
+    buy_result = _execute_signal(
+        router=router_buy,
+        trading_engine=trading_engine_buy,
+        ticker="AAPL",
+        forecast_bundle={"horizon": 30},
+        current_price=100.0,
+        market_data=market_data,
+        quality={"quality_score": 0.9},
+        data_source="yfinance",
+        mid_price=100.0,
+        run_id="run_quarantine",
+        quarantine_new_buys=True,
+        quarantine_reason="Eligibility snapshot computation failed; suppressing new BUY routing.",
+    )
+
+    assert buy_result is not None
+    assert buy_result["status"] == "REJECTED"
+    assert buy_result["quarantined"] is True
+    assert buy_result["cycle_status"] == "QUARANTINED"
+    assert buy_result["execution_policy_blocked"] is True
+    assert buy_result["execution_policy_reason_codes"] == ["QUARANTINED"]
+    trading_engine_buy.execute_signal.assert_not_called()
+
+    # SELL side is still allowed to flow so close-side evidence can accumulate.
+    router_sell = MagicMock()
+    router_sell.route_signal.return_value = _Bundle("SELL")
+    trading_engine_sell = MagicMock()
+    trading_engine_sell.execute_signal.return_value = _Result("SELL")
+    sell_result = _execute_signal(
+        router=router_sell,
+        trading_engine=trading_engine_sell,
+        ticker="AAPL",
+        forecast_bundle={"horizon": 30},
+        current_price=100.0,
+        market_data=market_data,
+        quality={"quality_score": 0.9},
+        data_source="yfinance",
+        mid_price=100.0,
+        run_id="run_quarantine",
+        quarantine_new_buys=True,
+        quarantine_reason="Eligibility snapshot computation failed; suppressing new BUY routing.",
+    )
+
+    assert sell_result is not None
+    assert sell_result["status"] == "EXECUTED"
+    assert sell_result["quarantined"] is True
+    assert sell_result["cycle_status"] == "QUARANTINED"
+    trading_engine_sell.execute_signal.assert_called_once()
+
+
+def test_coerce_open_position_shares_handles_mocked_and_string_inputs() -> None:
+    assert _coerce_open_position_shares(MagicMock()) == 0
+    assert _coerce_open_position_shares("3") == 3
+    assert _coerce_open_position_shares("3.9") == 3
+    assert _coerce_open_position_shares(None) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -670,6 +801,39 @@ class TestRoutingTaxonomyFields:
             f"Empty routing_reason must not be written, got {sc.get('routing_reason')!r}"
         )
 
+    def test_ticker_status_snapshot_written_for_trade_context(
+        self, tmp_path: Path
+    ) -> None:
+        """Trade execution snapshots must carry ticker_status_snapshot into signal_context."""
+        audit_file = tmp_path / "forecast_audit_20260409_000002_trade.json"
+        payload = _make_audit_payload()
+        audit_file.write_text(json.dumps(payload), encoding="utf-8")
+
+        forecast_bundle = {"horizon": 30, "forecast_audit_path": str(audit_file)}
+        execution_report = {
+            "ts_signal_id": "ts_AAPL_20260409_0003",
+            "signal_timestamp": "2026-04-09T09:00:00+00:00",
+            "action": "BUY",
+            "signal_confidence": 0.72,
+            "routing_reason": "confidence_above_threshold",
+            "snr": 2.1,
+            "ticker_status_snapshot": "HEALTHY",
+            "executed": True,
+            "status": "EXECUTED",
+        }
+
+        with patch("scripts.run_auto_trader.ROOT_PATH", tmp_path):
+            _attach_signal_context_to_forecast_audit(
+                forecast_bundle=forecast_bundle,
+                execution_report=execution_report,
+                ticker="AAPL",
+                run_id="20260409_090000",
+            )
+
+        result = json.loads(audit_file.read_text())
+        sc = result.get("signal_context", {})
+        assert sc.get("ticker_status_snapshot") == "HEALTHY"
+
     def test_outcome_linkage_report_default_audit_dir_prefers_production(self) -> None:
         """outcome_linkage_attribution_report DEFAULT_AUDIT_DIR logic: prefers production/."""
         # Test the selection logic directly without re-importing the module
@@ -691,3 +855,110 @@ class TestRoutingTaxonomyFields:
             shutil.rmtree(str(prod))
             chosen2 = prod if prod.exists() else fallback
             assert chosen2 == fallback, "Must fall back to root when production/ absent"
+
+
+def test_generate_time_series_forecast_prefers_explicit_execution_mode_over_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Live runs must route audits from the resolved execution mode, not stale env.
+
+    This is the structural fix for split-brain routing: the forecast writer must
+    honor the run's explicit execution_mode so a dirty EXECUTION_MODE shell value
+    cannot silently send live evidence to the synthetic/research path.
+    """
+    import scripts.run_auto_trader as run_auto_trader
+
+    monkeypatch.setenv("EXECUTION_MODE", "synthetic")
+    monkeypatch.setenv("TS_FORECAST_AUDIT_DIR", str(tmp_path / "logs" / "forecast_audits"))
+
+    captured: Dict[str, Any] = {}
+
+    class _DummyForecaster:
+        def __init__(self, config):
+            captured["audit_log_dir"] = (config.ensemble_kwargs or {}).get("audit_log_dir")
+
+        def fit(self, *args, **kwargs):
+            return None
+
+        def forecast(self):
+            return {
+                "forecast_audit_path": str(
+                    tmp_path / "logs" / "forecast_audits" / "production" / "forecast_audit_live.json"
+                )
+            }
+
+    monkeypatch.setattr(run_auto_trader, "TimeSeriesForecaster", _DummyForecaster)
+    monkeypatch.setattr(run_auto_trader, "_run_oos_evaluation_audit", lambda *args, **kwargs: None)
+
+    frame = pd.DataFrame(
+        {
+            "Close": [100.0, 101.0, 102.0, 103.0, 104.0],
+            "Open": [99.5, 100.5, 101.5, 102.5, 103.5],
+            "High": [100.5, 101.5, 102.5, 103.5, 104.5],
+            "Low": [99.0, 100.0, 101.0, 102.0, 103.0],
+            "Volume": [1_000, 1_000, 1_000, 1_000, 1_000],
+        },
+        index=pd.date_range("2024-01-01", periods=5, freq="D"),
+    )
+
+    bundle, current_price = run_auto_trader._generate_time_series_forecast(
+        frame,
+        3,
+        ticker="AAPL",
+        execution_mode="live",
+    )
+
+    assert bundle is not None
+    assert current_price == pytest.approx(104.0)
+    assert str(captured["audit_log_dir"]).replace("\\", "/").endswith("logs/forecast_audits/production")
+
+
+def test_generate_time_series_forecast_defaults_to_live_when_execution_mode_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import scripts.run_auto_trader as run_auto_trader
+
+    monkeypatch.setenv("EXECUTION_MODE", "synthetic")
+    monkeypatch.setenv("TS_FORECAST_AUDIT_DIR", str(tmp_path / "logs" / "forecast_audits"))
+
+    captured: Dict[str, Any] = {}
+
+    class _DummyForecaster:
+        def __init__(self, config):
+            captured["audit_log_dir"] = (config.ensemble_kwargs or {}).get("audit_log_dir")
+
+        def fit(self, *args, **kwargs):
+            return None
+
+        def forecast(self):
+            return {
+                "forecast_audit_path": str(
+                    tmp_path / "logs" / "forecast_audits" / "production" / "forecast_audit_live.json"
+                )
+            }
+
+    monkeypatch.setattr(run_auto_trader, "TimeSeriesForecaster", _DummyForecaster)
+    monkeypatch.setattr(run_auto_trader, "_run_oos_evaluation_audit", lambda *args, **kwargs: None)
+
+    frame = pd.DataFrame(
+        {
+            "Close": [100.0, 101.0, 102.0, 103.0, 104.0],
+            "Open": [99.5, 100.5, 101.5, 102.5, 103.5],
+            "High": [100.5, 101.5, 102.5, 103.5, 104.5],
+            "Low": [99.0, 100.0, 101.0, 102.0, 103.0],
+            "Volume": [1_000, 1_000, 1_000, 1_000, 1_000],
+        },
+        index=pd.date_range("2024-01-01", periods=5, freq="D"),
+    )
+
+    bundle, current_price = run_auto_trader._generate_time_series_forecast(
+        frame,
+        3,
+        ticker="AAPL",
+    )
+
+    assert bundle is not None
+    assert current_price == pytest.approx(104.0)
+    assert str(captured["audit_log_dir"]).replace("\\", "/").endswith("logs/forecast_audits/production")

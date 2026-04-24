@@ -6,11 +6,16 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
 import pytest
+
+try:  # Python 3.11+
+    from datetime import UTC
+except ImportError:  # Python 3.10 fallback
+    UTC = timezone.utc
 
 # Guard import-time side effects from test modules that instantiate forecasters
 # before fixtures execute.

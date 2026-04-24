@@ -50,8 +50,19 @@ function Find-RepoRoot([string]$StartDir) {
 }
 
 function Get-PythonExe([string]$RepoRoot) {
-  $venvPy = Join-Path $RepoRoot "simpleTrader_env\\Scripts\\python.exe"
-  if (Test-Path -LiteralPath $venvPy) { return $venvPy }
+  if ($env:PMX_PYTHON_BIN -and (Test-Path -LiteralPath $env:PMX_PYTHON_BIN)) {
+    return $env:PMX_PYTHON_BIN
+  }
+  $candidates = @(
+    (Join-Path $RepoRoot "simpleTrader_env_win\Scripts\python.exe"),
+    (Join-Path $RepoRoot "simpleTrader_env\Scripts\python.exe"),
+    (Join-Path $RepoRoot "simpleTrader_env\bin\python")
+  )
+  foreach ($candidate in $candidates) {
+    if ($candidate -and (Test-Path -LiteralPath $candidate)) { return $candidate }
+  }
+  $cmd = Get-Command python -ErrorAction SilentlyContinue
+  if ($cmd) { return $cmd.Source }
   return "python"
 }
 
@@ -171,6 +182,8 @@ $ollamaHealthHost = $openclawOllamaBaseUrl
 
 # Ensure Python helper sees it (OpenClaw itself will read from config after apply).
 $env:OPENCLAW_OLLAMA_BASE_URL = $openclawOllamaBaseUrl
+$env:OPENCLAW_LOCAL_ONLY = "1"
+$env:OPENCLAW_OLLAMA_MODEL_ORDER = "qwen3:8b,deepseek-r1:8b,deepseek-r1:32b"
 
 $ollamaExe = Ensure-OllamaInstalled
 if ($ollamaExe) {
@@ -178,14 +191,14 @@ if ($ollamaExe) {
   Start-OllamaIfNeeded -OllamaExePath $ollamaExe -Host $ollamaHealthHost
   Pull-RecommendedModels -OllamaExePath $ollamaExe
 } else {
-  Write-Warn "Proceeding without Ollama installed. OpenClaw will use remote model primary and keep local fallbacks configured for later."
+  Write-Warn "Proceeding without Ollama installed. OpenClaw will keep the local-only model posture, but the canonical qwen3:8b primary will stay unavailable until Ollama is installed."
 }
 
 Write-Step ("Configuring OpenClaw model failover (strategy=" + $Strategy + ")")
 if (-not $SkipRestartGateway) {
-  & $py scripts/openclaw_models.py apply --strategy $Strategy --restart-gateway | Out-Host
+  & $py scripts/openclaw_models.py apply --strategy $Strategy --ollama-models "qwen3:8b,deepseek-r1:8b,deepseek-r1:32b" --sync-auth --restart-gateway | Out-Host
 } else {
-  & $py scripts/openclaw_models.py apply --strategy $Strategy | Out-Host
+  & $py scripts/openclaw_models.py apply --strategy $Strategy --ollama-models "qwen3:8b,deepseek-r1:8b,deepseek-r1:32b" --sync-auth | Out-Host
 }
 
 Write-Step "Status:"

@@ -17,7 +17,10 @@ function Resolve-PreferredPython {
 
     $candidates = @()
     if ($env:PMX_OBSERVABILITY_PYTHON) { $candidates += $env:PMX_OBSERVABILITY_PYTHON }
+    if ($env:PMX_PYTHON_BIN) { $candidates += $env:PMX_PYTHON_BIN }
+    $candidates += (Join-Path $RepoRoot "simpleTrader_env_win\Scripts\python.exe")
     $candidates += (Join-Path $RepoRoot "simpleTrader_env\Scripts\python.exe")
+    $candidates += (Join-Path $RepoRoot "simpleTrader_env\bin\python")
     $candidates += "python"
 
     foreach ($candidate in $candidates) {

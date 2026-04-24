@@ -27,6 +27,7 @@ from datetime import datetime, timezone
 from dataclasses import dataclass, field
 
 from etl.timestamp_utils import utc_now
+from etl.env_flags import is_synthetic_mode
 from utils.weather_context import extract_weather_context
 
 from etl.time_series_forecaster import (
@@ -56,6 +57,17 @@ except Exception:  # pragma: no cover
     resolve_barbell_bucket = None  # type: ignore
     build_barbell_market_context = None  # type: ignore
     evaluate_barbell_path_risk = None  # type: ignore
+
+try:
+    from scripts.robustness_thresholds import (
+        MIN_SIGNAL_TO_NOISE_KEY,
+        load_floored_thresholds,
+    )
+except Exception:  # pragma: no cover - keep generator usable in direct execution
+    from robustness_thresholds import (  # type: ignore
+        MIN_SIGNAL_TO_NOISE_KEY,
+        load_floored_thresholds,
+    )
 
 try:  # pragma: no cover - optional import for execution references
     from execution.order_manager import request_safe_price
@@ -233,10 +245,19 @@ class TimeSeriesSignalGenerator:
                     self._default_roundtrip_cost_bps[str(key).upper()] = float(value)
                 except (TypeError, ValueError):
                     continue
+        floored_routing = load_floored_thresholds(Path("config/signal_routing_config.yml"))
         try:
-            self._min_signal_to_noise = float(self._cost_model.get("min_signal_to_noise", 0.0) or 0.0)
+            raw_snr = float(
+                self._cost_model.get(
+                    MIN_SIGNAL_TO_NOISE_KEY,
+                    floored_routing.get(MIN_SIGNAL_TO_NOISE_KEY, 1.5),
+                )
+                or 0.0
+            )
         except (TypeError, ValueError):
-            self._min_signal_to_noise = 0.0
+            raw_snr = float(floored_routing.get(MIN_SIGNAL_TO_NOISE_KEY, 1.5) or 1.5)
+        self._min_signal_to_noise = max(raw_snr, float(floored_routing.get(MIN_SIGNAL_TO_NOISE_KEY, 1.5) or 1.5))
+        self._cost_model[MIN_SIGNAL_TO_NOISE_KEY] = self._min_signal_to_noise
         self._quant_validation_config_path = (
             Path(quant_validation_config_path).expanduser()
             if quant_validation_config_path
@@ -553,9 +574,12 @@ class TimeSeriesSignalGenerator:
                 )
                 if isinstance(routing_cm, dict):
                     # Only pull scalar gate params; don't override LOB depth profiles
-                    for key in ("min_signal_to_noise", "default_roundtrip_cost_bps"):
+                    for key in (MIN_SIGNAL_TO_NOISE_KEY, "default_roundtrip_cost_bps"):
                         if key in routing_cm and key not in result:
                             result[key] = routing_cm[key]
+                    floors = load_floored_thresholds(src_path)
+                    if MIN_SIGNAL_TO_NOISE_KEY in floors:
+                        result[MIN_SIGNAL_TO_NOISE_KEY] = float(floors[MIN_SIGNAL_TO_NOISE_KEY])
             except Exception as exc:  # pragma: no cover
                 logger.debug("Unable to load signal routing cost model: %s", exc)
 
@@ -1584,7 +1608,7 @@ class TimeSeriesSignalGenerator:
         # 1) Edge score: 0 when net edge is tiny, 1 when it is meaningfully above threshold.
         threshold = max(float(min_expected_return), 1e-6)
         edge_ratio = float(net_trade_return) / threshold if threshold > 0 else float(net_trade_return)
-        edge_score = self._clamp01(edge_ratio / 3.0)  # 3x threshold -> full credit
+        edge_score = self._clamp01(edge_ratio / 10.0)  # 10x threshold -> full credit (2% at 20bps min)
 
         # 2) Uncertainty score from SNR (CI-implied).
         if snr is None:
@@ -1595,7 +1619,7 @@ class TimeSeriesSignalGenerator:
             )
             snr_score = 0.0
         else:
-            snr_score = self._clamp01((float(snr) - 0.5) / 1.5)  # 0.5 -> 0, 2.0 -> 1
+            snr_score = self._clamp01((float(snr) - 0.5) / 3.0)  # 0.5 -> 0, 3.5 -> 1
 
         # 3) Volatility factor (optional soft penalty; don't artificially inflate).
         # Piecewise-linear between anchor points to eliminate cliff-edge jumps:
@@ -2048,9 +2072,9 @@ class TimeSeriesSignalGenerator:
         # Stop loss: ATR-based (preferred) or volatility-based fallback
         atr = self._compute_atr(market_data)
         if atr is not None and current_price > 0:
-            # ATR * 1.5 positions stop below 1.5 average noise ranges.
+            # ATR * 2.0 positions stop below 2 average noise ranges.
             # No upper cap -- high-vol names need wider stops to avoid noise fires.
-            stop_loss_pct = max((atr * 1.5) / current_price, 0.015)
+            stop_loss_pct = max((atr * 2.0) / current_price, 0.015)
         elif volatility is not None:
             # Fallback: model-implied vol, 1.5%-5% clamp
             stop_loss_pct = max(0.015, min(0.05, volatility * 0.5))
@@ -2061,6 +2085,18 @@ class TimeSeriesSignalGenerator:
             stop_loss = current_price * (1 - stop_loss_pct)
         else:  # SELL
             stop_loss = current_price * (1 + stop_loss_pct)
+
+        # Enforce minimum R:R of 2:1 — target distance must be ≥ 2× stop distance.
+        # A signal that risked $10 to gain $0.09 (the AAPL case) is structurally
+        # unprofitable at any win rate below 91%. Extend the target rather than
+        # tightening the stop so ATR-based risk sizing is preserved.
+        stop_dist = abs(current_price - stop_loss)
+        target_dist = abs(target_price - current_price)
+        if stop_dist > 0 and target_dist < 2.0 * stop_dist:
+            if action == 'BUY':
+                target_price = current_price + 2.0 * stop_dist
+            else:
+                target_price = current_price - 2.0 * stop_dist
 
         return target_price, stop_loss
 
@@ -3917,10 +3953,13 @@ class TimeSeriesSignalGenerator:
             action = str(entry.get("action", "")).upper()
             if action and action not in {"BUY", "SELL"}:
                 continue
-            # Exclude synthetic execution entries — mirrors the DB tier's
-            # `is_synthetic=0` filter so both tiers train on production signals only.
+            # Exclude synthetic execution entries using the canonical helper so
+            # the JSONL tier matches the execution/DB provenance contract.
             exec_mode = str(entry.get("execution_mode") or "").lower()
-            if exec_mode == "synthetic":
+            data_source_hint = entry.get("data_source")
+            if data_source_hint is None and isinstance(entry.get("market_context"), dict):
+                data_source_hint = entry["market_context"].get("data_source")
+            if is_synthetic_mode(execution_mode=exec_mode or None, data_source=data_source_hint):
                 continue
             # Prefer raw_confidence (pre-blend) so LR trains on the same distribution
             # that predict_proba is evaluated on.  Fall back to blended 'confidence'

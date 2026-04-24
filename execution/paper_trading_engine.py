@@ -26,6 +26,7 @@ import pandas as pd
 
 from ai_llm.signal_validator import SignalValidator
 from etl.database_manager import DatabaseManager
+from etl.env_flags import is_synthetic_mode
 from etl.timestamp_utils import ensure_utc, utc_now, ensure_utc_index
 from execution.lob_simulator import LOBConfig, simulate_market_order_fill
 
@@ -53,6 +54,42 @@ def _infer_asset_class_from_ticker(ticker: str) -> str:
     return "US_EQUITY"
 
 
+def _compute_market_atr(market_data: Optional[pd.DataFrame], period: int = 14) -> Optional[float]:
+    """Best-effort ATR in price units from the latest OHLC bars."""
+    if not isinstance(market_data, pd.DataFrame) or market_data.empty:
+        return None
+    if not {"High", "Low"}.issubset(set(market_data.columns)):
+        return None
+    try:
+        high = pd.to_numeric(market_data["High"], errors="coerce")
+        low = pd.to_numeric(market_data["Low"], errors="coerce")
+        true_range = (high - low).rolling(int(period)).mean()
+        atr = true_range.iloc[-1]
+        if pd.isna(atr):
+            return None
+        atr_f = float(atr)
+        return atr_f if atr_f > 0 else None
+    except Exception:
+        return None
+
+
+def _coerce_optional_int(value: Any) -> Optional[int]:
+    """Best-effort int coercion without silently accepting non-numeric blobs."""
+    try:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return int(value)
+        if isinstance(value, int):
+            return value
+        text = str(value).strip()
+        if not text:
+            return None
+        return int(text)
+    except (TypeError, ValueError):
+        return None
+
+
 @dataclass
 class Trade:
     """Trade execution details"""
@@ -73,7 +110,11 @@ class Trade:
     stop_loss: Optional[float] = None
     target_price: Optional[float] = None
     forecast_horizon: Optional[int] = None
+    effective_horizon: Optional[int] = None
+    ticker_status_snapshot: Optional[str] = None
+    max_holding_days_override: Optional[int] = None
     exit_reason: Optional[str] = None
+    entry_atr: Optional[float] = None
     mid_price: Optional[float] = None
     mid_slippage_bps: Optional[float] = None
     data_source: Optional[str] = None
@@ -113,6 +154,7 @@ class Portfolio:
     cash: float
     positions: Dict[str, int] = field(default_factory=dict)  # ticker -> shares
     entry_prices: Dict[str, float] = field(default_factory=dict)  # ticker -> avg entry price
+    entry_atrs: Dict[str, float] = field(default_factory=dict)  # ticker -> entry ATR snapshot
     entry_timestamps: Dict[str, datetime] = field(default_factory=dict)  # ticker -> opened timestamp
     entry_bar_timestamps: Dict[str, datetime] = field(default_factory=dict)  # ticker -> opened bar timestamp
     entry_trade_ids: Dict[str, int] = field(default_factory=dict)  # ticker -> opening trade ID (for audit linkage)
@@ -207,6 +249,7 @@ class PaperTradingEngine:
                     cash=state["cash"],
                     positions=state["positions"],
                     entry_prices=state["entry_prices"],
+                    entry_atrs=state.get("entry_atrs") or {},
                     entry_timestamps=state["entry_timestamps"],
                     stop_losses=state["stop_losses"],
                     target_prices=state["target_prices"],
@@ -408,18 +451,31 @@ class PaperTradingEngine:
             portfolio.entry_lots.pop(ticker, None)
         self._sync_entry_trade_id_map(portfolio, ticker)
 
-    def _append_open_lot_to_portfolio(self, portfolio: Portfolio, trade: Trade, trade_id: int) -> None:
+    def _append_open_lot_to_portfolio(
+        self,
+        portfolio: Portfolio,
+        trade: Trade,
+        trade_id: int,
+        *,
+        remaining_shares: Optional[float] = None,
+    ) -> None:
         try:
             trade_id_i = int(trade_id)
         except (TypeError, ValueError):
             return
         if trade_id_i <= 0:
             return
+        try:
+            lot_shares = float(trade.shares if remaining_shares is None else remaining_shares)
+        except (TypeError, ValueError):
+            return
+        if lot_shares <= 1e-9:
+            return
         portfolio.entry_lots.setdefault(trade.ticker, []).append(
             {
                 "trade_id": trade_id_i,
                 "action": str(trade.action).upper(),
-                "remaining_shares": float(trade.shares),
+                "remaining_shares": lot_shares,
                 "is_synthetic": int(trade.is_synthetic or 0),
                 "trade_date": trade.timestamp.date().isoformat() if isinstance(trade.timestamp, datetime) else None,
                 "bar_timestamp": trade.bar_timestamp.isoformat() if isinstance(trade.bar_timestamp, datetime) else None,
@@ -520,6 +576,54 @@ class PaperTradingEngine:
                 except (TypeError, ValueError):
                     signal["confidence"] = 0.5
                 forced_exit_shares = abs(int(current_position))
+
+        # For forced exits, resolve the opening leg's is_synthetic so the CLOSE
+        # trade inherits the OPEN's production/synthetic status rather than the
+        # current cycle's data-source mode.  A live OPEN must close as live even
+        # if the fetcher temporarily fell back to synthetic data this cycle.
+        # This is the primary guard against THIN_LINKAGE contamination:
+        #   active_extractor may switch to "synthetic" on yfinance failure,
+        #   setting effective_execution_mode="synthetic" for the cycle, which
+        #   would tag the close is_synthetic=1 and exclude it from
+        #   production_closed_trades.
+        # Fallback policy: when opener_id is known but DB lookup fails, default
+        # to is_synthetic=0 (safe/live direction).  The execution_mode fallback
+        # is NOT used for forced exits because the current cycle's data-source
+        # mode is irrelevant to whether the OPENING position was live.
+        _forced_is_synthetic: Optional[int] = None
+        if forced_exit_reason:
+            _opener_id = self.portfolio.entry_trade_ids.get(ticker)
+            if _opener_id:
+                try:
+                    _row = self.db_manager.conn.execute(
+                        "SELECT COALESCE(is_synthetic, 0) FROM trade_executions WHERE id=?",
+                        (int(_opener_id),),
+                    ).fetchone()
+                    if _row is not None:
+                        _forced_is_synthetic = int(_row[0])
+                        logger.debug(
+                            "[LIVE_FUNNEL] Forced exit %s: inherited is_synthetic=%d "
+                            "from opener trade_id=%d",
+                            ticker, _forced_is_synthetic, int(_opener_id),
+                        )
+                    else:
+                        # Row absent — opener may have been pruned; default live (0).
+                        _forced_is_synthetic = 0
+                        logger.warning(
+                            "[LIVE_FUNNEL] Forced exit %s: opener trade_id=%d not found "
+                            "in DB — defaulting is_synthetic=0 (live). "
+                            "THIN_LINKAGE credit may be affected.",
+                            ticker, int(_opener_id),
+                        )
+                except Exception as _fe_exc:
+                    # DB error — do NOT fall through to execution_mode; default live (0).
+                    _forced_is_synthetic = 0
+                    logger.warning(
+                        "[LIVE_FUNNEL] Forced exit %s: DB lookup for opener trade_id=%s "
+                        "failed (%s) — defaulting is_synthetic=0 (live). "
+                        "execution_mode fallback suppressed to prevent contamination.",
+                        ticker, _opener_id, _fe_exc,
+                    )
 
         # Exit eligibility diagnostic log for every open position.
         if current_position != 0 and current_price:
@@ -767,8 +871,35 @@ class PaperTradingEngine:
             forecast_horizon = int(horizon_raw) if horizon_raw is not None else None
         except (TypeError, ValueError):
             forecast_horizon = None
+        max_holding_days_override_raw = signal.get("max_holding_days_override")
+        try:
+            max_holding_days_override = (
+                int(max_holding_days_override_raw)
+                if max_holding_days_override_raw is not None
+                else None
+            )
+        except (TypeError, ValueError):
+            max_holding_days_override = None
+        if forecast_horizon is not None and forecast_horizon > 0:
+            cap = int(os.getenv("MAX_HOLDING_DAYS_CAP", "10"))
+            if max_holding_days_override is not None and max_holding_days_override > 0:
+                cap = max(cap, max_holding_days_override)
+            effective_horizon = min(forecast_horizon, cap)
+        else:
+            effective_horizon = None
+
+        entry_atr = signal.get("entry_atr")
+        if entry_atr is None:
+            entry_atr = _compute_market_atr(market_data)
 
         asset_class = _infer_asset_class_from_ticker(ticker)
+        raw_signal_id = signal.get("signal_id")
+        signal_id_ref = _coerce_optional_int(raw_signal_id)
+        ts_signal_id_ref = signal.get("ts_signal_id")
+        if ts_signal_id_ref is None and signal_id_ref is None:
+            raw_signal_text = str(raw_signal_id).strip() if raw_signal_id is not None else ""
+            if raw_signal_text:
+                ts_signal_id_ref = raw_signal_text
         trade = Trade(
             ticker=ticker,
             action=action,
@@ -779,11 +910,14 @@ class PaperTradingEngine:
             bar_timestamp=bar_timestamp,
             is_paper_trade=True,
             slippage=(abs(entry_price - float(current_price)) / float(current_price)) if current_price else 0.0,
-            signal_id=signal.get('signal_id'),
-            ts_signal_id=signal.get('ts_signal_id'),  # Phase 7.13-A2
+            signal_id=signal_id_ref,
+            ts_signal_id=ts_signal_id_ref,  # Phase 7.13-A2
+            ticker_status_snapshot=signal.get("ticker_status_snapshot"),
             stop_loss=signal.get("stop_loss"),
             target_price=signal.get("target_price"),
             forecast_horizon=forecast_horizon,
+            effective_horizon=effective_horizon,
+            max_holding_days_override=max_holding_days_override,
             exit_reason=signal.get("exit_reason") if forced_exit_reason else None,
             data_source=data_source,
             execution_mode=execution_mode,
@@ -796,11 +930,11 @@ class PaperTradingEngine:
             base_confidence=signal.get("base_confidence"),
             effective_confidence=signal.get("confidence"),
             confidence_calibrated=signal.get("confidence_calibrated"),
+            entry_atr=entry_atr,
             is_diagnostic=1 if diag_mode else 0,
-            is_synthetic=1 if (
-                (data_source and "synthetic" in str(data_source).lower())
-                or str(execution_mode or "").lower() == "synthetic"
-            ) else 0,
+            is_synthetic=_forced_is_synthetic if _forced_is_synthetic is not None else (
+                1 if is_synthetic_mode(execution_mode=execution_mode, data_source=data_source) else 0
+            ),
             is_forced_exit=1 if bool(signal.get("forced_exit")) else 0,
         )
         mid_price_hint = signal.get("mid_price_hint")
@@ -823,12 +957,31 @@ class PaperTradingEngine:
             stored = self._store_trade_execution(trade)
             trade.realized_pnl = stored.realized_pnl
             trade.realized_pnl_pct = stored.realized_pct
+            reversal_residual_shares = 0.0
+            if stored.is_close and current_position != 0 and stored.position_after != 0:
+                # Reverse-through-flat trades are both a close and a new open.
+                # Persist the residual side as an opener lot so resume/replay can
+                # reconstruct it and later closes keep their `entry_trade_id`
+                # linkage intact.
+                crossed_flat = (
+                    (current_position > 0 and stored.position_after < 0)
+                    or (current_position < 0 and stored.position_after > 0)
+                )
+                if crossed_flat:
+                    reversal_residual_shares = abs(float(stored.position_after))
             if stored.is_close:
                 self._apply_close_allocations_to_portfolio(
                     updated_portfolio,
                     trade.ticker,
                     stored.close_allocations,
                 )
+                if reversal_residual_shares > 1e-9:
+                    self._append_open_lot_to_portfolio(
+                        updated_portfolio,
+                        trade,
+                        stored.trade_id,
+                        remaining_shares=reversal_residual_shares,
+                    )
                 if not stored.close_allocations and updated_portfolio.positions.get(trade.ticker, 0) == 0:
                     updated_portfolio.entry_lots.pop(trade.ticker, None)
                     updated_portfolio.entry_trade_ids.pop(trade.ticker, None)
@@ -896,7 +1049,7 @@ class PaperTradingEngine:
             signal: Trading signal
             confidence_score: Adjusted confidence (0-1)
             market_data: Historical data for risk estimation
-            current_position: Existing shares held (long only)
+            current_position: Existing shares held (positive long / negative short)
 
         Returns:
             Number of shares to trade
@@ -922,6 +1075,11 @@ class PaperTradingEngine:
             max_short_pct = 0.05
             conf_floor = 0.10
 
+        _, _, current_price_ref, _ = self._find_last_market_observation(market_data)
+        current_price = self._safe_float(current_price_ref)
+        if current_price is None or current_price <= 0.0:
+            return 0
+
         # Maximum position size (scaled by per-ticker regime state when available)
         portfolio_value = self._current_portfolio_value()
         max_position_value = portfolio_value * max_pos_pct
@@ -936,19 +1094,37 @@ class PaperTradingEngine:
             risk_mult = self._get_regime_risk_multiplier(ticker)
             max_position_value *= risk_mult
         action = signal.get("action", "HOLD").upper()
+
+        reducing_exposure = (action == "SELL" and current_position > 0) or (
+            action == "BUY" and current_position < 0
+        )
+
         if action == "SELL":
             # Tighter cap for shorts
             max_position_value = portfolio_value * max_short_pct
 
+        if not reducing_exposure:
+            candidate_cap = self._candidate_kelly_cap(signal)
+            diversification_scale = self._candidate_diversification_scale(
+                signal,
+                portfolio_value=portfolio_value,
+                current_position=current_position,
+                current_price=current_price,
+            )
+            candidate_scale = candidate_cap * diversification_scale
+            if candidate_scale != 1.0:
+                logger.debug(
+                    "Candidate sizing modifiers for %s: cap=%.3f diversification=%.3f scale=%.3f",
+                    ticker or "<unknown>",
+                    candidate_cap,
+                    diversification_scale,
+                    candidate_scale,
+                )
+            max_position_value *= candidate_scale
+
         # Adjust by confidence (floor configurable via risk mode)
         confidence_weight = max(confidence_score, conf_floor)
         position_value = max_position_value * confidence_weight
-
-        # Calculate shares
-        _, _, current_price_ref, _ = self._find_last_market_observation(market_data)
-        current_price = self._safe_float(current_price_ref)
-        if current_price is None or current_price <= 0.0:
-            return 0
 
         if action == "SELL":
             desired = max(0, int(position_value / current_price))
@@ -980,6 +1156,30 @@ class PaperTradingEngine:
                     shares = 1
 
         return max(1, shares) if diag_mode else max(0, shares)
+
+    def _candidate_kelly_cap(self, signal: Dict[str, Any]) -> float:
+        raw_cap = self._safe_float(signal.get("sizing_kelly_fraction_cap"))
+        if raw_cap is None:
+            return 1.0
+        return max(0.0, min(1.0, raw_cap))
+
+    def _candidate_diversification_scale(
+        self,
+        signal: Dict[str, Any],
+        *,
+        portfolio_value: float,
+        current_position: int,
+        current_price: float,
+    ) -> float:
+        raw_penalty = self._safe_float(signal.get("diversification_penalty"))
+        if raw_penalty is None or raw_penalty <= 0.0:
+            return 1.0
+        if portfolio_value <= 0.0 or current_price <= 0.0 or current_position == 0:
+            return 1.0
+
+        penalty = max(0.0, min(1.0, raw_penalty))
+        exposure_ratio = min(abs(current_position) * current_price / max(portfolio_value, 1e-12), 1.0)
+        return 1.0 / (1.0 + penalty * exposure_ratio)
 
     def _get_regime_risk_multiplier(self, ticker: str) -> float:
         """
@@ -1222,6 +1422,7 @@ class PaperTradingEngine:
             cash=portfolio.cash,
             positions=portfolio.positions.copy(),
             entry_prices=portfolio.entry_prices.copy(),
+            entry_atrs=portfolio.entry_atrs.copy(),
             entry_timestamps=portfolio.entry_timestamps.copy(),
             entry_bar_timestamps=portfolio.entry_bar_timestamps.copy(),
             entry_trade_ids=portfolio.entry_trade_ids.copy(),
@@ -1303,6 +1504,7 @@ class PaperTradingEngine:
         # Lifecycle metadata update (best-effort).
         new_shares = new_portfolio.positions.get(trade.ticker, 0)
         if new_shares == 0:
+            new_portfolio.entry_atrs.pop(trade.ticker, None)
             new_portfolio.entry_timestamps.pop(trade.ticker, None)
             new_portfolio.entry_bar_timestamps.pop(trade.ticker, None)
             new_portfolio.last_bar_timestamps.pop(trade.ticker, None)
@@ -1318,6 +1520,29 @@ class PaperTradingEngine:
                 new_portfolio.entry_bar_timestamps[trade.ticker] = entry_bar_ts
                 new_portfolio.last_bar_timestamps[trade.ticker] = entry_bar_ts
                 new_portfolio.holding_bars[trade.ticker] = 0
+                if trade.entry_atr is not None:
+                    try:
+                        new_portfolio.entry_atrs[trade.ticker] = float(trade.entry_atr)
+                    except (TypeError, ValueError):
+                        pass
+            elif trade.entry_atr is not None:
+                try:
+                    prior_atr = new_portfolio.entry_atrs.get(trade.ticker)
+                    new_atr = float(trade.entry_atr)
+                    if prior_atr is None:
+                        new_portfolio.entry_atrs[trade.ticker] = new_atr
+                    else:
+                        prior_weight = abs(float(old_shares))
+                        trade_weight = abs(float(trade.shares))
+                        total_weight = prior_weight + trade_weight
+                        if total_weight > 0:
+                            new_portfolio.entry_atrs[trade.ticker] = (
+                                float(prior_atr) * prior_weight + new_atr * trade_weight
+                            ) / total_weight
+                        else:
+                            new_portfolio.entry_atrs[trade.ticker] = new_atr
+                except (TypeError, ValueError):
+                    pass
             if trade.stop_loss is not None:
                 try:
                     new_portfolio.stop_losses[trade.ticker] = float(trade.stop_loss)
@@ -1334,10 +1559,17 @@ class PaperTradingEngine:
                 except (TypeError, ValueError):
                     horizon = None
                 if horizon is not None and horizon > 0:
-                    # Phase 7.10: Cap max holding to avoid multi-day drag.
-                    # Adversarial audit found multi-day trades net -$229.49.
-                    # Cap at 10 bars unless proof-mode sets tighter limits.
+                    # Cap max holding. High-SNR signals may supply a separate override
+                    # from run_auto_trader.py; keep the baseline cap tighter so only
+                    # high-conviction names get the longer runway.
                     cap = int(os.getenv("MAX_HOLDING_DAYS_CAP", "10"))
+                    override = getattr(trade, "max_holding_days_override", None)
+                    try:
+                        override_i = int(override) if override is not None else None
+                    except (TypeError, ValueError):
+                        override_i = None
+                    if override_i is not None and override_i > 0:
+                        cap = max(cap, override_i)
                     new_portfolio.max_holding_days[trade.ticker] = min(horizon, cap)
 
         # Update total value
@@ -1365,6 +1597,7 @@ class PaperTradingEngine:
             holding_bars=self.portfolio.holding_bars,
             entry_bar_timestamps=self.portfolio.entry_bar_timestamps,
             last_bar_timestamps=self.portfolio.last_bar_timestamps,
+            entry_atrs=self.portfolio.entry_atrs,
         )
 
     def _evaluate_exit_reason(
@@ -1394,6 +1627,40 @@ class PaperTradingEngine:
             target_price_f = float(target_price) if target_price is not None else None
         except (TypeError, ValueError):
             target_price_f = None
+
+        # Trailing stop ratchet — lock in gains once position is meaningfully in profit.
+        # ATR must come from the persisted entry-time snapshot. If that snapshot is
+        # missing (legacy rows), we leave the stop unchanged rather than inferring a
+        # synthetic ATR from the current stop distance.
+        entry_price = self.portfolio.entry_prices.get(ticker)
+        entry_atr = self.portfolio.entry_atrs.get(ticker)
+        try:
+            effective_atr = float(entry_atr) if entry_atr is not None else 0.0
+        except (TypeError, ValueError):
+            effective_atr = 0.0
+        if entry_price and stop_loss_f is not None and effective_atr > 0:
+            if shares > 0:
+                profit = current_price - float(entry_price)
+                if profit >= 1.5 * effective_atr:
+                    new_stop = float(entry_price) + 0.5 * effective_atr
+                elif profit >= 1.0 * effective_atr:
+                    new_stop = float(entry_price)
+                else:
+                    new_stop = None
+                if new_stop is not None and new_stop > stop_loss_f:
+                    self.portfolio.stop_losses[ticker] = new_stop
+                    stop_loss_f = new_stop
+            else:  # short position
+                profit = float(entry_price) - current_price
+                if profit >= 1.5 * effective_atr:
+                    new_stop = float(entry_price) - 0.5 * effective_atr
+                elif profit >= 1.0 * effective_atr:
+                    new_stop = float(entry_price)
+                else:
+                    new_stop = None
+                if new_stop is not None and new_stop < stop_loss_f:
+                    self.portfolio.stop_losses[ticker] = new_stop
+                    stop_loss_f = new_stop
 
         # Stop/target checks are evaluated first (price-based exits).
         if shares > 0:
@@ -1616,6 +1883,27 @@ class PaperTradingEngine:
             contamination_flag = max(int(trade.is_contaminated or 0), int(is_contaminated_ref or 0))
             trade.is_contaminated = contamination_flag
 
+            # Diagnostic: warn if a live opener is closed by a synthetic closer.
+            # After FIX-1 (_forced_is_synthetic lookup), this should never fire for
+            # forced exits; if it does, the DB lookup silently fell back and the
+            # execution_mode-based path produced an incorrect is_synthetic=1.
+            if entry_trade_id_ref and int(trade.is_synthetic or 0) == 1:
+                try:
+                    _opener_row = self.db_manager.conn.execute(
+                        "SELECT COALESCE(is_synthetic, 0) FROM trade_executions WHERE id=?",
+                        (int(entry_trade_id_ref),),
+                    ).fetchone()
+                    if _opener_row and _opener_row[0] == 0:
+                        logger.warning(
+                            "[INT-05] live-open/synthetic-close mismatch detected for %s "
+                            "(opener trade_id=%d is_synthetic=0, closer is_synthetic=1). "
+                            "This close WILL be excluded from production_closed_trades. "
+                            "Check _forced_is_synthetic DB lookup path.",
+                            trade.ticker, int(entry_trade_id_ref),
+                        )
+                except Exception:
+                    pass
+
             trade_id = self.db_manager.save_trade_execution(
                 ticker=trade.ticker,
                 trade_date=trade.timestamp.date(),
@@ -1645,6 +1933,7 @@ class PaperTradingEngine:
                 barbell_multiplier=trade.barbell_multiplier,
                 base_confidence=trade.base_confidence,
                 effective_confidence=trade.effective_confidence,
+                effective_horizon=trade.effective_horizon,
                 entry_price=entry_price_ref,
                 exit_price=exit_price_ref,
                 close_size=close_size_ref,
@@ -1659,6 +1948,7 @@ class PaperTradingEngine:
                 is_contaminated=contamination_flag,
                 confidence_calibrated=trade.confidence_calibrated,
                 ts_signal_id=trade.ts_signal_id,  # Phase 7.13-A2
+                ticker_status_snapshot=trade.ticker_status_snapshot,
                 is_forced_exit=trade.is_forced_exit,  # Phase 10
             )
 

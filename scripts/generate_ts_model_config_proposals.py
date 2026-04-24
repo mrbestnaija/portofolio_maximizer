@@ -44,6 +44,9 @@ class TSCandidate:
     stability: Optional[float]
     dm_better_model: Optional[str]
     dm_p_value: Optional[float]
+    target_amplitude_hit_rate: Optional[float] = None
+    regime_similarity_weight: Optional[float] = None
+    regime_evidence_mode: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -54,6 +57,9 @@ class TSCandidate:
             "stability": self.stability,
             "dm_better_model": self.dm_better_model,
             "dm_p_value": self.dm_p_value,
+            "target_amplitude_hit_rate": self.target_amplitude_hit_rate,
+            "regime_similarity_weight": self.regime_similarity_weight,
+            "regime_evidence_mode": self.regime_evidence_mode,
         }
 
 
@@ -100,9 +106,17 @@ def _load_best_candidates(db_path: Path) -> List[TSCandidate]:
             dm_p_raw = dm_block.get("p_value")
             if dm_p_raw is not None:
                 dm_p = float(dm_p_raw)
+            amp_raw = metrics_payload.get("target_amplitude_hit_rate")
+            amp = float(amp_raw) if amp_raw is not None else None
+            regime_weight_raw = metrics_payload.get("regime_similarity_weight")
+            regime_weight = float(regime_weight_raw) if regime_weight_raw is not None else None
+            regime_mode = metrics_payload.get("regime_evidence_mode")
         except Exception:
             dm_better = None
             dm_p = None
+            amp = None
+            regime_weight = None
+            regime_mode = None
 
         best[key] = TSCandidate(
             ticker=ticker,
@@ -112,6 +126,9 @@ def _load_best_candidates(db_path: Path) -> List[TSCandidate]:
             stability=stability_val,
             dm_better_model=dm_better,
             dm_p_value=dm_p,
+            target_amplitude_hit_rate=amp,
+            regime_similarity_weight=regime_weight,
+            regime_evidence_mode=str(regime_mode) if regime_mode is not None else None,
         )
     return list(best.values())
 
@@ -125,9 +142,15 @@ def _load_best_candidates(db_path: Path) -> List[TSCandidate]:
 )
 @click.option(
     "--min-stability",
-    default=0.0,
+    default=0.85,
     show_default=True,
     help="Minimum stability score (0–1) required to emit a proposal.",
+)
+@click.option(
+    "--min-target-amplitude-hit-rate",
+    default=0.10,
+    show_default=True,
+    help="Minimum target-amplitude hit rate required to emit a proposal when available.",
 )
 @click.option(
     "--max-dm-pvalue",
@@ -144,6 +167,7 @@ def _load_best_candidates(db_path: Path) -> List[TSCandidate]:
 def main(
     db_path: str,
     min_stability: float,
+    min_target_amplitude_hit_rate: float,
     max_dm_pvalue: float,
     output: str,
 ) -> None:
@@ -170,6 +194,8 @@ def main(
     for c in candidates:
         if c.stability is not None and c.stability < min_stability:
             continue
+        if c.target_amplitude_hit_rate is not None and c.target_amplitude_hit_rate < min_target_amplitude_hit_rate:
+            continue
         if c.dm_p_value is not None and c.dm_p_value > max_dm_pvalue:
             continue
         proposals.append(
@@ -181,6 +207,9 @@ def main(
                 "stability": c.stability,
                 "dm_better_model": c.dm_better_model,
                 "dm_p_value": c.dm_p_value,
+                "target_amplitude_hit_rate": c.target_amplitude_hit_rate,
+                "regime_similarity_weight": c.regime_similarity_weight,
+                "regime_evidence_mode": c.regime_evidence_mode,
                 "action": "suggest_profile_update",
                 "notes": "Map this (ticker, regime) to a model profile or forecaster config consistent with this candidate.",
             }
@@ -190,6 +219,7 @@ def main(
         "generated_at": Path().stat().st_mtime,
         "db_path": str(path),
         "min_stability": float(min_stability),
+        "min_target_amplitude_hit_rate": float(min_target_amplitude_hit_rate),
         "max_dm_pvalue": float(max_dm_pvalue),
         "proposals": proposals,
     }

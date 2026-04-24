@@ -59,6 +59,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from integrity.sqlite_guardrails import guarded_sqlite_connect
+
 # Load .env so whitelist env vars (INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS etc.)
 # are available both in CLI runs and in pytest integration tests against the real DB.
 try:
@@ -103,8 +105,21 @@ def _read(path: Path) -> str:
 def _db_connect(db_path: Path) -> Optional[sqlite3.Connection]:
     if not db_path.exists():
         return None
+    resolved_path = db_path.expanduser()
+    if not resolved_path.is_absolute():
+        resolved_path = (ROOT / resolved_path).resolve()
     try:
-        conn = sqlite3.connect(str(db_path), timeout=3.0)
+        # WSL-backed CI can surface sqlite3 "disk I/O error" on writable opens
+        # against Windows-mounted databases. Prefer an immutable read-only URI
+        # so the diagnostic can still inspect live evidence without mutating it.
+        uri = f"file:{resolved_path.as_posix()}?mode=ro&immutable=1"
+        conn = guarded_sqlite_connect(uri, uri=True, timeout=3.0)
+    except Exception:
+        try:
+            conn = guarded_sqlite_connect(str(resolved_path), timeout=3.0)
+        except Exception:
+            return None
+    try:
         conn.row_factory = sqlite3.Row
         return conn
     except Exception:

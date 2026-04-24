@@ -50,6 +50,7 @@ from etl.data_validator import DataValidator
 from etl.data_storage import DataStorage
 from etl.preprocessor import Preprocessor
 from etl.time_series_forecaster import TimeSeriesForecaster, TimeSeriesForecasterConfig
+from scripts.compute_ticker_eligibility import compute_eligibility
 from execution.paper_trading_engine import PaperTradingEngine
 from models.signal_router import SignalRouter, validate_routing_contract
 from etl.data_universe import resolve_ticker_universe
@@ -360,6 +361,7 @@ def _build_semantic_admission(
         signal_context.get("admission_override_reason_codes"),
         fallback_reason_code=signal_context.get("admission_override_reason_code"),
     )
+    quarantined = bool(signal_context.get("quarantined"))
     missing_execution_metadata_fields: list[str] = []
 
     reason_codes: list[str] = []
@@ -388,9 +390,11 @@ def _build_semantic_admission(
         reason_codes.append("ROUTING_AMBIGUOUS")
     if not production_labeled:
         reason_codes.append("NOT_PRODUCTION_LABELED")
+    if quarantined:
+        reason_codes.append("QUARANTINED")
 
     admissible = len(reason_codes) == 0
-    bucket = "ELIGIBLE" if admissible else "ACCEPTED_NONELIGIBLE"
+    bucket = "QUARANTINED" if quarantined else "ELIGIBLE" if admissible else "ACCEPTED_NONELIGIBLE"
     return {
         "admission_contract_version": 1,
         "accepted_for_audit_history": True,
@@ -400,8 +404,8 @@ def _build_semantic_admission(
         "reason_code": "READY" if admissible else ",".join(reason_codes),
         "reason_codes": [] if admissible else list(reason_codes),
         "production_labeled": production_labeled,
-        "not_quarantined": True,
-        "quarantined": False,
+        "not_quarantined": not quarantined,
+        "quarantined": quarantined,
         "superseded": False,
         "duplicate_conflict": False,
         "missing_execution_metadata": bool(missing_execution_metadata_fields),
@@ -754,6 +758,7 @@ def _build_action_plan(
     cash_ratio: Optional[float],
     forecaster_health: Dict[str, Any],
     quant_health: Dict[str, Any],
+    orchestration_health: Optional[Dict[str, Any]] = None,
 ) -> list[str]:
     """Translate profitability/liquidity/forecast health into next-step prompts."""
     actions: list[str] = []
@@ -822,12 +827,250 @@ def _build_action_plan(
                 f"Quant validation failing {fail_frac:.2f}>{max_fail:.2f}; pause risky buckets until signals improve."
             )
 
+    if isinstance(orchestration_health, dict):
+        summary = orchestration_health.get("summary") or {}
+        latest = orchestration_health.get("latest") or {}
+        source_counts = summary.get("oos_source_counts") or {}
+        if isinstance(source_counts, dict):
+            heuristic_n = int(source_counts.get("heuristic_fallback") or 0)
+            proxy_n = int(source_counts.get("cv_fold_proxy") or 0)
+            if heuristic_n > 0 or proxy_n > 0:
+                actions.append(
+                    "Refresh trailing OOS evidence before trusting the ensemble; current runs still fall back to proxy/heuristic selection."
+                )
+        if latest.get("mssa_eligible") is False and latest.get("mssa_white_noise") is False:
+            actions.append(
+                "Keep MSSA-RL containment-only until residual white-noise passes; it is excluded from ensemble confidence on this run."
+            )
+        if latest.get("garch_unstable") is True:
+            actions.append(
+                "Reduce GARCH reliance in unstable regimes; the latest cycle hit a degraded volatility fallback."
+            )
+        if latest.get("preprocess_production_ok") is False:
+            actions.append(
+                "Keep sparse / high-impute windows out of live capital; preprocessing health is research-only on the latest run."
+            )
+        if latest.get("evidence_production_ok") is False:
+            actions.append(
+                "Refresh observed OOS evidence before promoting the path; the latest evidence bundle is not production-ready."
+            )
+
     if not actions:
         actions.append(
             "Metrics within thresholds; continue current playbook and monitor dashboards."
         )
 
     return actions
+
+
+def _extract_orchestration_health_snapshot(
+    forecast_bundle: Dict[str, Any],
+    *,
+    ticker: str,
+    run_id: str,
+    cycle: int,
+    data_source: Optional[str],
+) -> Dict[str, Any]:
+    """Compact per-ticker orchestration health snapshot for dashboard tracking."""
+    if not isinstance(forecast_bundle, dict):
+        return {}
+
+    raw_health = forecast_bundle.get("ensemble_health")
+    if not isinstance(raw_health, dict):
+        ensemble_meta = forecast_bundle.get("ensemble_metadata") or {}
+        if isinstance(ensemble_meta, dict):
+            raw_health = ensemble_meta.get("health")
+    if not isinstance(raw_health, dict):
+        return {}
+
+    oos = raw_health.get("oos_evidence") if isinstance(raw_health.get("oos_evidence"), dict) else {}
+    mssa = raw_health.get("mssa_rl") if isinstance(raw_health.get("mssa_rl"), dict) else {}
+    garch = raw_health.get("garch") if isinstance(raw_health.get("garch"), dict) else {}
+    ensemble = raw_health.get("ensemble") if isinstance(raw_health.get("ensemble"), dict) else {}
+    evidence = forecast_bundle.get("evidence_health") if isinstance(forecast_bundle.get("evidence_health"), dict) else {}
+    preprocess = forecast_bundle.get("preprocess_health") if isinstance(forecast_bundle.get("preprocess_health"), dict) else {}
+
+    return {
+        "ticker": str(ticker or "").upper(),
+        "run_id": run_id,
+        "cycle": int(cycle),
+        "data_source": data_source,
+        "status": raw_health.get("status") or "UNKNOWN",
+        "issues": list(raw_health.get("issues") or []),
+        "oos_source": oos.get("source_kind"),
+        "oos_quality": oos.get("quality"),
+        "oos_source_dir": oos.get("source_dir"),
+        "oos_source_path": oos.get("source_path"),
+        "oos_models": oos.get("finite_rmse_models"),
+        "oos_rank_active": bool(oos.get("rmse_rank_active")),
+        "mssa_eligible": mssa.get("eligible"),
+        "mssa_white_noise": mssa.get("white_noise"),
+        "mssa_policy_status": mssa.get("policy_status"),
+        "garch_fallback_mode": garch.get("fallback_mode"),
+        "garch_unstable": garch.get("degraded"),
+        "garch_white_noise": garch.get("white_noise"),
+        "ensemble_status": ensemble.get("ensemble_status") or raw_health.get("ensemble_status"),
+        "ensemble_reason": ensemble.get("ensemble_decision_reason") or raw_health.get("ensemble_decision_reason"),
+        "allow_as_default": ensemble.get("allow_as_default"),
+        "evidence_source_kind": evidence.get("source_kind"),
+        "evidence_freshness_status": evidence.get("freshness_status"),
+        "evidence_oos_metrics_available": evidence.get("oos_metrics_available"),
+        "evidence_rmse_rank_active": evidence.get("rmse_rank_active"),
+        "evidence_fallback_class": evidence.get("fallback_class"),
+        "evidence_production_ok": evidence.get("production_ok"),
+        "preprocess_status": preprocess.get("status"),
+        "preprocess_quality_tag": preprocess.get("quality_tag"),
+        "preprocess_production_ok": preprocess.get("production_ok"),
+        "preprocess_reason": preprocess.get("reason"),
+    }
+
+
+def _summarize_orchestration_health(records: list[Dict[str, Any]]) -> Dict[str, Any]:
+    """Aggregate per-ticker orchestration health into a run-level summary."""
+    if not records:
+        return {
+            "status": "MISSING",
+            "summary": {
+                "snapshots": 0,
+                "oos_source_counts": {},
+                "evidence_source_counts": {},
+                "mssa_white_noise_failures": 0,
+                "garch_unstable_runs": 0,
+                "rmse_rank_active_runs": 0,
+                "allow_as_default_runs": 0,
+                "preprocess_blocked_runs": 0,
+                "preprocess_research_only_runs": 0,
+            },
+            "latest": {},
+            "issues": [],
+        }
+
+    source_counts: Dict[str, int] = {}
+    evidence_source_counts: Dict[str, int] = {}
+    issues: list[str] = []
+    mssa_failures = 0
+    garch_unstable = 0
+    rmse_rank_active = 0
+    allow_default = 0
+    preprocess_blocked = 0
+    preprocess_research_only = 0
+    for rec in records:
+        source = str(rec.get("oos_source") or "unknown")
+        source_counts[source] = source_counts.get(source, 0) + 1
+        evidence_source = str(rec.get("evidence_source_kind") or "unknown")
+        evidence_source_counts[evidence_source] = evidence_source_counts.get(evidence_source, 0) + 1
+        if rec.get("mssa_eligible") is False and rec.get("mssa_white_noise") is False:
+            mssa_failures += 1
+            issues.append("mssa_rl_white_noise_failed")
+        if rec.get("garch_unstable") is True:
+            garch_unstable += 1
+            issues.append("garch_unstable_reliance")
+        if rec.get("oos_rank_active") is True:
+            rmse_rank_active += 1
+        if rec.get("allow_as_default") is True:
+            allow_default += 1
+        if source in {"heuristic_fallback", "cv_fold_proxy", "none"}:
+            issues.append("oos_proxy_or_heuristic")
+        if evidence_source in {"heuristic_fallback", "cv_fold_proxy", "none", "stale_rejected"}:
+            issues.append("evidence_proxy_or_heuristic")
+        if rec.get("evidence_production_ok") is False:
+            issues.append("evidence_not_production_ok")
+        if rec.get("preprocess_production_ok") is False:
+            preprocess_blocked += 1
+            issues.append("preprocess_research_only")
+        if str(rec.get("preprocess_quality_tag") or "").upper() in {"SPARSE_DATA", "HIGH_IMPUTE"}:
+            preprocess_research_only += 1
+
+    unique_issues = sorted(set(issues))
+    status = "OK"
+    if not records:
+        status = "MISSING"
+    elif unique_issues:
+        status = "WARN"
+
+    return {
+        "status": status,
+        "summary": {
+            "snapshots": len(records),
+            "oos_source_counts": source_counts,
+            "evidence_source_counts": evidence_source_counts,
+            "mssa_white_noise_failures": mssa_failures,
+            "garch_unstable_runs": garch_unstable,
+            "rmse_rank_active_runs": rmse_rank_active,
+            "allow_as_default_runs": allow_default,
+            "preprocess_blocked_runs": preprocess_blocked,
+            "preprocess_research_only_runs": preprocess_research_only,
+        },
+        "latest": records[-1],
+        "issues": unique_issues,
+    }
+
+
+def _summarize_preprocess_health(records: list[Dict[str, Any]]) -> Dict[str, Any]:
+    """Aggregate per-ticker preprocess health into a run-level summary."""
+    if not records:
+        return {
+            "status": "MISSING",
+            "summary": {
+                "snapshots": 0,
+                "status_counts": {},
+                "quality_tag_counts": {},
+                "production_ok_runs": 0,
+                "research_only_runs": 0,
+                "sparse_runs": 0,
+                "high_impute_runs": 0,
+            },
+            "latest": {},
+            "issues": [],
+        }
+
+    status_counts: Dict[str, int] = {}
+    quality_tag_counts: Dict[str, int] = {}
+    production_ok_runs = 0
+    research_only_runs = 0
+    sparse_runs = 0
+    high_impute_runs = 0
+    issues: list[str] = []
+
+    for rec in records:
+        status = str(rec.get("status") or "UNKNOWN").upper()
+        status_counts[status] = status_counts.get(status, 0) + 1
+        quality_tag = str(rec.get("quality_tag") or "UNKNOWN").upper()
+        quality_tag_counts[quality_tag] = quality_tag_counts.get(quality_tag, 0) + 1
+        if rec.get("production_ok") is True:
+            production_ok_runs += 1
+        else:
+            research_only_runs += 1
+            issues.append("preprocess_research_only")
+        if quality_tag == "SPARSE_DATA":
+            sparse_runs += 1
+        if quality_tag == "HIGH_IMPUTE":
+            high_impute_runs += 1
+            issues.append("preprocess_high_impute")
+        if status == "FAIL":
+            issues.append("preprocess_blocked")
+
+    unique_issues = sorted(set(issues))
+    status = "OK"
+    if unique_issues:
+        status = "WARN"
+    if status_counts.get("FAIL", 0) > 0:
+        status = "FAIL"
+
+    return {
+        "status": status,
+        "summary": {
+            "snapshots": len(records),
+            "status_counts": status_counts,
+            "quality_tag_counts": quality_tag_counts,
+            "production_ok_runs": production_ok_runs,
+            "research_only_runs": research_only_runs,
+            "sparse_runs": sparse_runs,
+            "high_impute_runs": high_impute_runs,
+        },
+        "latest": records[-1],
+        "issues": unique_issues,
+    }
 
 
 def _llm_signals_ready_for_trading(
@@ -1125,6 +1368,42 @@ def _write_performance_artifact(kind: str, payload: Dict[str, Any]) -> None:
         logger.debug("Unable to write performance artifact %s", kind, exc_info=True)
 
 
+def _edge_safe_runtime_enabled() -> bool:
+    """Return True when the runtime should default to compact CPU-safe behavior."""
+    return _env_flag("PMX_EDGE_SAFE_RUNTIME") is True
+
+
+def _normalize_execution_mode(raw_mode: Optional[str], *, default: str = "live") -> str:
+    """Normalize execution mode values without consulting ambient env state."""
+    mode = str(raw_mode or default).strip().lower()
+    if mode not in {"live", "synthetic", "auto"}:
+        return default
+    return mode
+
+
+def _resolve_parallel_runtime_profile() -> Dict[str, Any]:
+    """Resolve fan-out defaults for the current runtime profile."""
+    edge_safe_runtime = _edge_safe_runtime_enabled()
+    default_parallel = not edge_safe_runtime
+
+    parallel_forecasts = _env_flag("ENABLE_PARALLEL_FORECASTS")
+    if parallel_forecasts is None:
+        legacy_parallel = _env_flag("ENABLE_PARALLEL_TICKERS")
+        parallel_forecasts = legacy_parallel if legacy_parallel is not None else default_parallel
+
+    parallel_ticker_processing = _env_flag("ENABLE_PARALLEL_TICKER_PROCESSING")
+    if parallel_ticker_processing is None:
+        legacy_parallel = _env_flag("ENABLE_PARALLEL_TICKERS")
+        parallel_ticker_processing = legacy_parallel if legacy_parallel is not None else default_parallel
+
+    return {
+        "edge_safe_runtime": edge_safe_runtime,
+        "parallel_forecasts": bool(parallel_forecasts),
+        "parallel_ticker_processing": bool(parallel_ticker_processing),
+        "parallel_workers": _parse_int_env("PARALLEL_TICKER_WORKERS"),
+    }
+
+
 def _gpu_parallel_enabled() -> bool:
     """Return True when torch+CUDA is available and GPU parallel is enabled."""
     global _GPU_PARALLEL_ENABLED
@@ -1133,7 +1412,7 @@ def _gpu_parallel_enabled() -> bool:
 
     enabled = _env_flag("ENABLE_GPU_PARALLEL")
     if enabled is None:
-        enabled = True
+        enabled = not _edge_safe_runtime_enabled()
 
     if not enabled or torch is None:
         _GPU_PARALLEL_ENABLED = False
@@ -1276,6 +1555,7 @@ def _generate_time_series_forecast(
     *,
     ticker: str = "",
     interval: Optional[str] = None,
+    execution_mode: Optional[str] = None,
 ) -> Tuple[Optional[Dict], Optional[float]]:
     """Fit the ensemble forecaster and return the forecast bundle + latest price."""
     if "Close" not in price_frame.columns:
@@ -1306,13 +1586,11 @@ def _generate_time_series_forecast(
         fcfg = _get_forecasting_config()
         ensemble_cfg = fcfg.get("ensemble", {})
         ensemble_kwargs = {k: v for k, v in ensemble_cfg.items() if k != "enabled"}
-        # Route audit files: live runs → production/, synthetic/research runs → research/.
-        # Synthetic auto_trader runs produce audit files with ts_signal_ids that never
-        # appear in production_closed_trades (is_synthetic=1 excluded), so routing
-        # them to production/ contaminates the THIN_LINKAGE and EVIDENCE_HYGIENE gates.
-        _audit_execution_mode = str(
-            os.getenv("EXECUTION_MODE", "live")
-        ).strip().lower()
+        # Route audit files from the resolved run mode only. Ambient EXECUTION_MODE
+        # is ignored here so a stale shell cannot redirect live evidence to research/.
+        _audit_execution_mode = _normalize_execution_mode(execution_mode, default="live")
+        if _audit_execution_mode not in {"live", "synthetic"}:
+            _audit_execution_mode = "live"
         _audit_subdir = (
             "research"
             if _audit_execution_mode == "synthetic"
@@ -1394,6 +1672,7 @@ def _generate_forecasts_bulk(
     parallel: bool,
     max_workers: Optional[int] = None,
     interval: Optional[str] = None,
+    execution_mode: Optional[str] = None,
 ) -> Dict[str, Tuple[Optional[Dict], Optional[float]]]:
     """
     Generate forecasts for many tickers, optionally in parallel.
@@ -1411,6 +1690,7 @@ def _generate_forecasts_bulk(
                 horizon,
                 ticker=symbol,
                 interval=interval,
+                execution_mode=execution_mode,
             )
         return out
 
@@ -1424,6 +1704,7 @@ def _generate_forecasts_bulk(
                 horizon,
                 ticker=symbol,
                 interval=interval,
+                execution_mode=execution_mode,
             ): symbol
             for symbol in tickers
         }
@@ -1441,11 +1722,38 @@ def _prepare_ticker_candidate(
     ticker: str,
     frame: pd.DataFrame,
     preprocessor: Preprocessor,
+    preprocess_policy: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Compute quality, preprocess, and derive mid-price for a ticker frame."""
     raw_frame = frame.copy()
     quality = _compute_quality_metrics(raw_frame)
     processed = _trim_trailing_unpriced_rows(_ensure_min_length(preprocessor.handle_missing(frame)))
+    preprocess_cfg = preprocess_policy if isinstance(preprocess_policy, dict) else {}
+    validate_post_preprocess = getattr(preprocessor, "validate_post_preprocess", None)
+    if callable(validate_post_preprocess):
+        preprocess_health = validate_post_preprocess(
+            raw_frame,
+            processed,
+            min_usable_bars=int(
+                preprocess_cfg.get("min_usable_bars", MIN_SERIES_POINTS) or MIN_SERIES_POINTS
+            ),
+            max_imputed_fraction=float(preprocess_cfg.get("max_imputed_fraction", 0.30) or 0.30),
+            max_padding_fraction=float(preprocess_cfg.get("max_padding_fraction", 0.20) or 0.20),
+            on_failure=str(preprocess_cfg.get("on_failure", "warn") or "warn"),
+        )
+    else:
+        preprocess_health = {
+            "status": "PASS",
+            "reason": "VALIDATOR_UNAVAILABLE",
+            "quality_tag": "UNKNOWN",
+            "production_ok": True,
+            "research_ok": True,
+            "raw_length": int(len(raw_frame)),
+            "processed_length": int(len(processed)),
+            "usable_bars": int(len(processed)),
+            "imputed_fraction": 0.0,
+            "padding_fraction": 0.0,
+        }
     mid_price = _compute_mid_price(processed)
     return {
         "ticker": ticker,
@@ -1453,6 +1761,7 @@ def _prepare_ticker_candidate(
         "raw_frame": raw_frame,
         "frame": processed,
         "quality": quality,
+        "preprocess_health": preprocess_health,
         "mid_price": mid_price,
     }
 
@@ -1463,6 +1772,7 @@ def _build_ticker_candidates(
     preprocessor: Preprocessor,
     parallel: bool,
     max_workers: Optional[int],
+    preprocess_policy: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """
     Prepare per-ticker candidates (quality + preprocessed frames), optionally in parallel.
@@ -1478,6 +1788,7 @@ def _build_ticker_candidates(
                 ticker=entry["ticker"],
                 frame=entry["frame"],
                 preprocessor=preprocessor,
+                preprocess_policy=preprocess_policy,
             )
             candidate.update(entry)
             out.append(candidate)
@@ -1492,6 +1803,7 @@ def _build_ticker_candidates(
                 ticker=entry["ticker"],
                 frame=entry["frame"],
                 preprocessor=preprocessor,
+                preprocess_policy=preprocess_policy,
             ): entry
             for entry in entries
         }
@@ -1506,6 +1818,13 @@ def _build_ticker_candidates(
                     "raw_frame": entry["frame"],
                     "frame": entry["frame"],
                     "quality": {"quality_score": 0.0, "missing_pct": 1.0, "coverage": 0.0, "outlier_frac": 0.0},
+                    "preprocess_health": {
+                        "status": "FAIL",
+                        "reason": "CANDIDATE_PREPARATION_FAILED",
+                        "quality_tag": "BLOCKED",
+                        "production_ok": False,
+                        "research_ok": False,
+                    },
                     "mid_price": None,
                 }
             candidate.update(entry)
@@ -1519,12 +1838,20 @@ def _prepare_candidate_with_forecast(
     frame: pd.DataFrame,
     preprocessor: Preprocessor,
     horizon: int,
+    preprocess_policy: Optional[Dict[str, Any]] = None,
+    execution_mode: Optional[str] = None,
 ) -> Dict[str, Any]:
-    candidate = _prepare_ticker_candidate(ticker=ticker, frame=frame, preprocessor=preprocessor)
+    candidate = _prepare_ticker_candidate(
+        ticker=ticker,
+        frame=frame,
+        preprocessor=preprocessor,
+        preprocess_policy=preprocess_policy,
+    )
     forecast_bundle, current_price = _generate_time_series_forecast(
         candidate["frame"],
         horizon,
         ticker=ticker,
+        execution_mode=execution_mode,
     )
     candidate["forecast_bundle"] = forecast_bundle
     candidate["current_price"] = current_price
@@ -1538,6 +1865,8 @@ def _build_candidates_with_forecasts(
     horizon: int,
     parallel: bool,
     max_workers: Optional[int],
+    preprocess_policy: Optional[Dict[str, Any]] = None,
+    execution_mode: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     if not entries:
         return []
@@ -1549,7 +1878,9 @@ def _build_candidates_with_forecasts(
                 ticker=entry["ticker"],
                 frame=entry["frame"],
                 preprocessor=preprocessor,
+                preprocess_policy=preprocess_policy,
                 horizon=horizon,
+                execution_mode=execution_mode,
             )
             candidate.update(entry)
             out.append(candidate)
@@ -1564,7 +1895,9 @@ def _build_candidates_with_forecasts(
                 ticker=entry["ticker"],
                 frame=entry["frame"],
                 preprocessor=preprocessor,
+                preprocess_policy=preprocess_policy,
                 horizon=horizon,
+                execution_mode=execution_mode,
             ): entry
             for entry in entries
         }
@@ -1579,6 +1912,13 @@ def _build_candidates_with_forecasts(
                     "raw_frame": entry["frame"],
                     "frame": entry["frame"],
                     "quality": {"quality_score": 0.0, "missing_pct": 1.0, "coverage": 0.0, "outlier_frac": 0.0},
+                    "preprocess_health": {
+                        "status": "FAIL",
+                        "reason": "CANDIDATE_PREPARATION_FAILED",
+                        "quality_tag": "BLOCKED",
+                        "production_ok": False,
+                        "research_ok": False,
+                    },
                     "mid_price": None,
                     "forecast_bundle": None,
                     "current_price": None,
@@ -1802,6 +2142,12 @@ def _build_routed_signal_snapshot(
         "signal_timestamp": payload.get("signal_timestamp") or signal.get("signal_timestamp"),
         "bar_timestamp": payload.get("bar_timestamp"),
         "forecast_horizon": payload.get("forecast_horizon") or signal.get("forecast_horizon"),
+        "effective_horizon": payload.get("effective_horizon") or signal.get("effective_horizon"),
+        "max_holding_days_override": payload.get("max_holding_days_override") or signal.get("max_holding_days_override"),
+        "entry_price": payload.get("entry_price") or signal.get("entry_price"),
+        "entry_atr": payload.get("entry_atr") or signal.get("entry_atr"),
+        "stop_loss": payload.get("stop_loss") or signal.get("stop_loss"),
+        "target_price": payload.get("target_price") or signal.get("target_price"),
         "hold_reason": hold_reason,
         "routing_reason": routing_reason,
         "snr": snr,
@@ -1822,6 +2168,7 @@ def _build_routed_signal_snapshot(
         "barbell_strategy_style": payload.get("barbell_strategy_style"),
         "barbell_rebalance_frequency_bars": payload.get("barbell_rebalance_frequency_bars"),
         "barbell_diagnostics": payload.get("barbell_diagnostics"),
+        "ticker_status_snapshot": payload.get("ticker_status_snapshot") or signal.get("ticker_status_snapshot"),
     }
     if quant_summary:
         snapshot["quant_validation"] = quant_summary
@@ -1870,6 +2217,7 @@ def _attach_signal_context_to_forecast_audit(
         "ts_signal_id": incoming_tsid or None,
         "ticker": ticker,
         "run_id": run_id,
+        "execution_mode": execution_report.get("execution_mode"),
         "entry_ts": incoming_entry_ts,
         "forecast_horizon": forecast_bundle.get("horizon"),
         "signal_context_missing": not bool(incoming_tsid),
@@ -1968,6 +2316,8 @@ def _attach_signal_context_to_forecast_audit(
         merged["ts_signal_id"] = incoming_tsid or (existing_tsid or None)
         merged["ticker"] = canonical_context.get("ticker") or merged.get("ticker")
         merged["run_id"] = canonical_context.get("run_id") or merged.get("run_id")
+        if canonical_context.get("execution_mode") not in (None, "", []):
+            merged["execution_mode"] = str(canonical_context.get("execution_mode")).strip().lower()
         merged["entry_ts"] = canonical_context.get("entry_ts") or merged.get("entry_ts")
 
         # Use dataset's forecast_horizon from the audit file to avoid HORIZON_MISMATCH.
@@ -1997,6 +2347,16 @@ def _attach_signal_context_to_forecast_audit(
             "execution_policy_blocked",
             "admission_override_reason_code",
             "admission_override_reason_codes",
+            "quarantined",
+            "cycle_status",
+            "quarantine_reason",
+            "entry_price",
+            "entry_atr",
+            "effective_horizon",
+            "ticker_status_snapshot",
+            "max_holding_days_override",
+            "stop_loss",
+            "target_price",
             "expected_return",
             "expected_return_net",
             "gross_trade_return",
@@ -2066,6 +2426,10 @@ def _attach_signal_context_to_forecast_audit(
         payload["execution_decision"] = {
             "executed": bool(execution_report.get("executed")),
             "execution_policy_blocked": bool(merged.get("execution_policy_blocked")),
+            "quarantined": bool(merged.get("quarantined")),
+            "cycle_status": merged.get("cycle_status"),
+            "quarantine_reason": merged.get("quarantine_reason"),
+            "execution_mode": merged.get("execution_mode"),
             "status": str(execution_report.get("status") or ""),
             "reason": str(execution_report.get("reason") or ""),
             "routed_action": routed_action or execution_report.get("action"),
@@ -2215,6 +2579,42 @@ def _validate_market_window(validator: DataValidator, data: pd.DataFrame) -> boo
     return False
 
 
+def _coerce_open_position_shares(value: Any) -> int:
+    """Return a non-negative integer share count for anti-pyramiding checks."""
+    if value is None:
+        return 0
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, float)):
+        return max(0, int(value))
+    try:
+        text = str(value).strip()
+        if not text:
+            return 0
+        return max(0, int(float(text)))
+    except Exception:
+        return 0
+
+
+def _count_open_lots_for_ticker(trading_engine: PaperTradingEngine, ticker: str) -> int:
+    """Count positive-remaining entry lots for a ticker."""
+    try:
+        portfolio = getattr(trading_engine, "portfolio", None)
+        entry_lots = getattr(portfolio, "entry_lots", {}) if portfolio is not None else {}
+        lots = entry_lots.get(ticker, []) if isinstance(entry_lots, dict) else []
+    except Exception:
+        lots = []
+
+    count = 0
+    for lot in lots:
+        if not isinstance(lot, dict):
+            continue
+        remaining = _coerce_open_position_shares(lot.get("remaining_shares"))
+        if remaining > 0:
+            count += 1
+    return count
+
+
 def _execute_signal(
     router: SignalRouter,
     trading_engine: PaperTradingEngine,
@@ -2233,6 +2633,10 @@ def _execute_signal(
     barbell_cfg: Optional[BarbellConfig] = None,
     proof_mode: bool = False,
     is_intraday: bool = False,
+    max_open_lots_per_ticker: Optional[int] = None,
+    ticker_status_snapshot: Optional[str] = None,
+    quarantine_new_buys: bool = False,
+    quarantine_reason: Optional[str] = None,
 ) -> Optional[Dict]:
     """Route signals and push the primary decision through the execution engine."""
     bundle = router.route_signal(
@@ -2249,6 +2653,44 @@ def _execute_signal(
     if not primary:
         logger.info("No actionable signal produced for %s", ticker)
         return None
+
+    # Anti-pyramiding: one open leg per ticker by default. Extra BUYs into an existing
+    # long create additional open legs that each need a CLOSE to count toward THIN_LINKAGE,
+    # delaying round-trip accumulation. Demote to HOLD when the open-lot limit is reached.
+    _current_position = _coerce_open_position_shares(
+        getattr(getattr(trading_engine, "portfolio", None), "positions", {}).get(ticker, 0)
+    )
+    _open_lot_count = _count_open_lots_for_ticker(trading_engine, ticker)
+    if _open_lot_count <= 0 and _current_position > 0:
+        _open_lot_count = 1
+    _lot_limit = None
+    try:
+        if max_open_lots_per_ticker is not None:
+            _lot_limit = max(1, int(max_open_lots_per_ticker))
+    except (TypeError, ValueError):
+        _lot_limit = None
+    if (
+        _lot_limit is not None
+        and _open_lot_count >= _lot_limit
+        and str(primary.get("action", "")).upper() == "BUY"
+    ):
+        logger.info(
+            "[ANTI_PYRAMID] Demoting BUY to HOLD for %s — open_lots=%s limit=%s. "
+            "One open leg per ticker enforced.",
+            ticker, _open_lot_count, _lot_limit,
+        )
+        primary = dict(primary)
+        primary["action"] = "HOLD"
+        primary["reason"] = "MAX_LOTS_REACHED"
+        primary["execution_policy_blocked"] = True
+        primary["execution_policy_reason_codes"] = ["MAX_LOTS_REACHED"]
+        primary["execution_policy_detail"] = (
+            f"Anti-pyramiding limit reached: open_lots={_open_lot_count} >= limit={_lot_limit}."
+        )
+        provenance = dict(primary.get("provenance") or {})
+        provenance["hold_reason"] = "MAX_LOTS_REACHED"
+        provenance["execution_policy_reason_codes"] = ["MAX_LOTS_REACHED"]
+        primary["provenance"] = provenance
 
     primary_provenance = primary.get("provenance") if isinstance(primary.get("provenance"), dict) else {}
     decision_context = (
@@ -2279,6 +2721,18 @@ def _execute_signal(
         raw_signal_id = primary_payload.get("signal_id")
         if isinstance(raw_signal_id, str) and raw_signal_id.strip():
             primary_payload["ts_signal_id"] = raw_signal_id.strip()
+
+    # High-conviction signals (SNR ≥ 2.0) get a longer lifecycle runway so developing
+    # winners are not prematurely TIME_EXIT'd before reaching the extended target.
+    # Keep the model forecast horizon intact for auditability, but add an explicit
+    # hold override so the engine can distinguish high-conviction runway from the
+    # default THIN_LINKAGE-friendly cap.
+    try:
+        if routing_snr is not None and float(routing_snr) >= 2.0:
+            primary_payload["max_holding_days_override"] = 15
+    except (TypeError, ValueError):
+        pass
+
     if run_id:
         primary_payload["run_id"] = run_id
     if execution_mode:
@@ -2369,6 +2823,40 @@ def _execute_signal(
             primary_payload.get("stop_loss"), primary_payload.get("target_price"),
         )
 
+    entry_atr_value = None
+    try:
+        if isinstance(market_data, pd.DataFrame) and len(market_data) >= 14 and {"High", "Low"}.issubset(set(market_data.columns)):
+            atr_series = (pd.to_numeric(market_data["High"], errors="coerce") - pd.to_numeric(market_data["Low"], errors="coerce")).rolling(14).mean()
+            atr_val = atr_series.iloc[-1]
+            if pd.notna(atr_val) and float(atr_val) > 0:
+                entry_atr_value = float(atr_val)
+    except Exception:
+        entry_atr_value = None
+    if entry_atr_value is not None:
+        primary_payload["entry_atr"] = entry_atr_value
+
+    effective_horizon_value = None
+    try:
+        horizon_candidate = primary_payload.get("forecast_horizon")
+        if horizon_candidate is not None:
+            horizon_candidate_i = int(horizon_candidate)
+            if horizon_candidate_i > 0:
+                cap = int(os.getenv("MAX_HOLDING_DAYS_CAP", "10"))
+                max_hold_override = primary_payload.get("max_holding_days_override")
+                if max_hold_override is not None:
+                    try:
+                        cap = max(cap, int(max_hold_override))
+                    except (TypeError, ValueError):
+                        pass
+                effective_horizon_value = min(horizon_candidate_i, cap)
+    except Exception:
+        effective_horizon_value = None
+    if effective_horizon_value is not None:
+        primary_payload["effective_horizon"] = effective_horizon_value
+    if ticker_status_snapshot not in (None, "", [], {}):
+        primary_payload["ticker_status_snapshot"] = ticker_status_snapshot
+    primary_payload["entry_price"] = current_price
+
     signal_snapshot = _build_routed_signal_snapshot(
         ticker=ticker,
         primary_signal=primary,
@@ -2389,19 +2877,27 @@ def _execute_signal(
         else {}
     )
 
-    # Execution policy pre-order block: signal rejected before reaching trading engine.
-    if primary_payload.get("execution_policy_blocked"):
-        reason_codes = list(primary_payload.get("execution_policy_reason_codes") or [])
-        logger.info(
-            "[PRE_ORDER_BLOCK] %s: signal blocked by execution policy, reason_codes=%s",
-            ticker, reason_codes,
+    cycle_status = "QUARANTINED" if quarantine_new_buys else "ACTIVE"
+
+    # Quarantine only suppresses new BUY routing. Close-side / defensive exits still flow
+    # so existing positions can continue to count toward realized evidence.
+    if quarantine_new_buys and str(routed_action).upper() == "BUY":
+        quarantine_codes = ["QUARANTINED"]
+        quarantine_detail = quarantine_reason or "Eligibility snapshot unavailable; suppressing new BUY routing."
+        logger.warning(
+            "[QUARANTINE] %s: BUY suppressed because cycle is quarantined (%s)",
+            ticker,
+            quarantine_detail,
         )
         return {
             "status": "REJECTED",
-            "reason": str(primary_payload.get("execution_policy_detail") or "execution_policy_blocked"),
+            "reason": quarantine_detail,
             "executed": False,
+            "execution_mode": execution_mode,
             "execution_policy_blocked": True,
-            "admission_override_reason_codes": reason_codes,
+            "admission_override_reason_codes": quarantine_codes,
+            "execution_policy_detail": quarantine_detail,
+            "execution_policy_reason_codes": quarantine_codes,
             "evidence_source_classification": "producer-native",
             "signal_id": primary_payload.get("signal_id"),
             "ts_signal_id": primary_payload.get("ts_signal_id"),
@@ -2429,28 +2925,39 @@ def _execute_signal(
             "quant_validation_failed_criteria": quant_validation_summary.get("failed_criteria"),
             "signal_timestamp": primary_payload.get("signal_timestamp"),
             "bar_timestamp": primary_payload.get("bar_timestamp"),
+            "entry_price": primary_payload.get("entry_price"),
+            "entry_atr": primary_payload.get("entry_atr"),
+            "effective_horizon": primary_payload.get("effective_horizon"),
+            "ticker_status_snapshot": primary_payload.get("ticker_status_snapshot"),
+            "max_holding_days_override": primary_payload.get("max_holding_days_override"),
+            "stop_loss": primary_payload.get("stop_loss"),
+            "target_price": primary_payload.get("target_price"),
             "signal_snapshot": signal_snapshot,
+            "quarantined": True,
+            "cycle_status": cycle_status,
+            "quarantine_reason": quarantine_detail,
         }
 
-    result = trading_engine.execute_signal(
-        primary_payload, market_data, proof_mode=proof_mode,
-    )
-    logger.info(
-        "Execution result for %s: %s%s",
-        ticker,
-        result.status,
-        f" | reason={result.reason}" if result.status != "EXECUTED" and result.reason else "",
-    )
-
-    mid_px = mid_price if mid_price is not None else _compute_mid_price(market_data)
-    if result.status != "EXECUTED":
+    # Execution policy pre-order block: signal rejected before reaching trading engine.
+    if primary_payload.get("execution_policy_blocked"):
+        reason_codes = list(primary_payload.get("execution_policy_reason_codes") or [])
+        logger.info(
+            "[PRE_ORDER_BLOCK] %s: signal blocked by execution policy, reason_codes=%s",
+            ticker, reason_codes,
+        )
         return {
-            "ticker": ticker,
-            "status": result.status,
-            "reason": result.reason,
+            "status": "REJECTED",
+            "reason": str(primary_payload.get("execution_policy_detail") or "execution_policy_blocked"),
             "executed": False,
+            "execution_mode": execution_mode,
+            "execution_policy_blocked": True,
+            "admission_override_reason_codes": reason_codes,
+            "execution_policy_detail": primary_payload.get("execution_policy_detail"),
+            "execution_policy_reason_codes": reason_codes,
+            "evidence_source_classification": "producer-native",
             "signal_id": primary_payload.get("signal_id"),
             "ts_signal_id": primary_payload.get("ts_signal_id"),
+            "ticker": ticker,
             "action": routed_action,
             "routed_action": routed_action,
             "executed_action": None,
@@ -2474,6 +2981,71 @@ def _execute_signal(
             "quant_validation_failed_criteria": quant_validation_summary.get("failed_criteria"),
             "signal_timestamp": primary_payload.get("signal_timestamp"),
             "bar_timestamp": primary_payload.get("bar_timestamp"),
+            "entry_price": primary_payload.get("entry_price"),
+            "entry_atr": primary_payload.get("entry_atr"),
+            "effective_horizon": primary_payload.get("effective_horizon"),
+            "ticker_status_snapshot": primary_payload.get("ticker_status_snapshot"),
+            "max_holding_days_override": primary_payload.get("max_holding_days_override"),
+            "stop_loss": primary_payload.get("stop_loss"),
+            "target_price": primary_payload.get("target_price"),
+            "signal_snapshot": signal_snapshot,
+            "quarantined": False,
+            "cycle_status": cycle_status,
+            "quarantine_reason": None,
+        }
+
+    result = trading_engine.execute_signal(
+        primary_payload, market_data, proof_mode=proof_mode,
+    )
+    logger.info(
+        "Execution result for %s: %s%s",
+        ticker,
+        result.status,
+        f" | reason={result.reason}" if result.status != "EXECUTED" and result.reason else "",
+    )
+
+    mid_px = mid_price if mid_price is not None else _compute_mid_price(market_data)
+    if result.status != "EXECUTED":
+        return {
+            "ticker": ticker,
+            "status": result.status,
+            "reason": result.reason,
+            "executed": False,
+            "execution_mode": execution_mode,
+            "signal_id": primary_payload.get("signal_id"),
+            "ts_signal_id": primary_payload.get("ts_signal_id"),
+            "execution_policy_detail": primary_payload.get("execution_policy_detail"),
+            "execution_policy_reason_codes": list(primary_payload.get("execution_policy_reason_codes") or []),
+            "action": routed_action,
+            "routed_action": routed_action,
+            "executed_action": None,
+            "execution_override_type": None,
+            "forced_exit": False,
+            "exit_reason": None,
+            "signal_source": primary.get("source", "TIME_SERIES"),
+            "signal_confidence": signal_snapshot.get("confidence"),
+            "confidence_calibrated": signal_snapshot.get("confidence_calibrated"),
+            "expected_return": signal_snapshot.get("expected_return"),
+            "expected_return_net": signal_snapshot.get("expected_return_net"),
+            "gross_trade_return": signal_snapshot.get("gross_trade_return"),
+            "net_trade_return": signal_snapshot.get("net_trade_return"),
+            "roundtrip_cost_fraction": signal_snapshot.get("roundtrip_cost_fraction"),
+            "roundtrip_cost_bps": signal_snapshot.get("roundtrip_cost_bps"),
+            "routing_reason": routing_reason,
+            "hold_reason": routing_hold_reason,
+            "snr": routing_snr,
+            "directional_gate_applied": signal_snapshot.get("directional_gate_applied"),
+            "quant_validation_status": quant_validation_summary.get("status"),
+            "quant_validation_failed_criteria": quant_validation_summary.get("failed_criteria"),
+            "signal_timestamp": primary_payload.get("signal_timestamp"),
+            "bar_timestamp": primary_payload.get("bar_timestamp"),
+            "entry_price": primary_payload.get("entry_price"),
+            "entry_atr": primary_payload.get("entry_atr"),
+            "effective_horizon": primary_payload.get("effective_horizon"),
+            "ticker_status_snapshot": primary_payload.get("ticker_status_snapshot"),
+            "max_holding_days_override": primary_payload.get("max_holding_days_override"),
+            "stop_loss": primary_payload.get("stop_loss"),
+            "target_price": primary_payload.get("target_price"),
             "warnings": result.validation_warnings,
             "quality": quality,
             "data_source": data_source,
@@ -2481,6 +3053,9 @@ def _execute_signal(
             "barbell_bucket": primary_payload.get("barbell_bucket"),
             "barbell_multiplier": primary_payload.get("barbell_multiplier"),
             "signal_snapshot": signal_snapshot,
+            "quarantined": bool(quarantine_new_buys),
+            "cycle_status": cycle_status,
+            "quarantine_reason": quarantine_reason,
         }
 
     realized_pnl = getattr(result.trade, "realized_pnl", None)
@@ -2536,6 +3111,12 @@ def _execute_signal(
         "evidence_eligible_for_gate": evidence_eligible_for_gate,
         "evidence_exclusion_reason": evidence_exclusion_reason,
         "entry_price": entry_price,
+        "entry_atr": primary_payload.get("entry_atr"),
+        "effective_horizon": primary_payload.get("effective_horizon"),
+        "ticker_status_snapshot": primary_payload.get("ticker_status_snapshot"),
+        "max_holding_days_override": primary_payload.get("max_holding_days_override"),
+        "stop_loss": primary_payload.get("stop_loss"),
+        "target_price": primary_payload.get("target_price"),
         "portfolio_value": result.portfolio.total_value if result.portfolio else None,
         "signal_source": primary.get("source", "TIME_SERIES"),
         "signal_confidence": signal_snapshot.get("confidence"),
@@ -2566,6 +3147,9 @@ def _execute_signal(
         "mid_price": mid_px,
         "mid_slippage_bp": mid_slippage_bp,
         "signal_snapshot": signal_snapshot,
+        "quarantined": bool(quarantine_new_buys),
+        "cycle_status": cycle_status,
+        "quarantine_reason": quarantine_reason,
     }
 
 
@@ -2642,8 +3226,11 @@ def _emit_dashboard_json(
     win_rate: float = 0.0,
     latencies: Optional[Dict[str, float]] = None,
     quality_summary: Optional[Dict[str, Any]] = None,
+    preprocess_health: Optional[Dict[str, Any]] = None,
     forecaster_health: Optional[Dict[str, Any]] = None,
     quant_validation_health: Optional[Dict[str, Any]] = None,
+    orchestration_health: Optional[Dict[str, Any]] = None,
+    runtime_status: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Persist the latest auto-trader producer snapshot for the dashboard bridge."""
     def _json_safe(obj: Any) -> Any:
@@ -2659,6 +3246,9 @@ def _emit_dashboard_json(
         "latency": latencies or {},
         "forecaster_health": forecaster_health or {},
         "quant_validation_health": quant_validation_health or {},
+        "orchestration_health": orchestration_health or {},
+        "preprocess_health": preprocess_health or {},
+        "runtime_status": runtime_status or {},
         "routing": {
             "ts_signals": routing_stats.get("time_series_signals", 0),
             "llm_signals": routing_stats.get("llm_fallback_signals", 0),
@@ -2715,6 +3305,19 @@ def _load_ai_companion_config(config_path: Path = AI_COMPANION_CONFIG_PATH) -> D
         return {}
 
     return payload
+
+
+def _load_preprocessing_config() -> Dict[str, Any]:
+    """Load preprocessing configuration for post-fill / post-pad health checks."""
+    cfg_path = ROOT_PATH / "config" / "preprocessing_config.yml"
+    if not cfg_path.exists():
+        return {}
+    try:
+        raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+    except Exception as exc:
+        logger.warning("Failed to load preprocessing config: %s", exc)
+        return {}
+    return raw.get("preprocessing", raw) if isinstance(raw, dict) else {}
 
 
 def _activate_ai_companion_guardrails(companion_config: Dict[str, Any]) -> None:
@@ -2944,12 +3547,13 @@ def main(
         logger.info("As-of date override active: %s", resolved_as_of_date.isoformat())
 
     base_tickers = [t.strip() for t in tickers.split(",") if t.strip()]
-    # CLI --execution-mode takes priority over EXECUTION_MODE env var (Phase 7.13-A1)
-    if execution_mode is not None:
-        os.environ["EXECUTION_MODE"] = execution_mode.strip().lower()
-    execution_mode = (os.getenv("EXECUTION_MODE") or "live").strip().lower()
-    if execution_mode not in {"live", "synthetic", "auto"}:
-        execution_mode = "live"
+    # Resolve execution mode once, then mirror the resolved value into env for child
+    # processes. Lower-level code should consume the explicit argument, not re-read env.
+    execution_mode = _normalize_execution_mode(
+        execution_mode if execution_mode is not None else os.getenv("EXECUTION_MODE"),
+        default="live",
+    )
+    os.environ["EXECUTION_MODE"] = execution_mode
     forecasting_cfg = _get_forecasting_config()
     ensemble_cfg = (
         forecasting_cfg.get("ensemble", {})
@@ -3187,7 +3791,21 @@ def main(
     for warning in routing_contract_warnings:
         logger.warning("%s (ignored/no-op unless strict mode enabled)", warning)
 
+    preprocessing_cfg = _load_preprocessing_config()
+    post_preprocess_cfg = {}
+    if isinstance(preprocessing_cfg, dict):
+        validation_cfg = preprocessing_cfg.get("validation") or {}
+        if isinstance(validation_cfg, dict):
+            post_preprocess_cfg = validation_cfg.get("post_preprocess") or {}
+
     ts_cfg = dict(routing_cfg.get("time_series") or {})
+    position_mgmt_cfg = routing_cfg.get("position_management") or {}
+    try:
+        max_open_lots_per_ticker = int(position_mgmt_cfg.get("max_open_lots_per_ticker", 1) or 1)
+    except (TypeError, ValueError):
+        max_open_lots_per_ticker = 1
+    if max_open_lots_per_ticker <= 0:
+        max_open_lots_per_ticker = 1
     strict_ts = str(os.getenv("PMX_PROOF_STRICT_THRESHOLDS") or "0") == "1"
     if proof_mode and strict_ts:
         # Defaults chosen to reduce churn: higher confidence + higher min-return
@@ -3236,20 +3854,25 @@ def main(
     else:
         logger.warning("Bar-aware trading DISABLED; loop may trade repeatedly on the same bar.")
 
-    parallel_forecasts = _env_flag("ENABLE_PARALLEL_FORECASTS")
-    if parallel_forecasts is None:
-        legacy_parallel = _env_flag("ENABLE_PARALLEL_TICKERS")
-        parallel_forecasts = legacy_parallel if legacy_parallel is not None else True
-    parallel_workers = _parse_int_env("PARALLEL_TICKER_WORKERS")
-    parallel_ticker_processing = _env_flag("ENABLE_PARALLEL_TICKER_PROCESSING")
-    if parallel_ticker_processing is None:
-        legacy_parallel = _env_flag("ENABLE_PARALLEL_TICKERS")
-        parallel_ticker_processing = legacy_parallel if legacy_parallel is not None else True
+    runtime_profile = _resolve_parallel_runtime_profile()
+    edge_safe_runtime = bool(runtime_profile["edge_safe_runtime"])
+    parallel_forecasts = bool(runtime_profile["parallel_forecasts"])
+    parallel_workers = runtime_profile["parallel_workers"]
+    parallel_ticker_processing = bool(runtime_profile["parallel_ticker_processing"])
+    if edge_safe_runtime:
+        logger.info(
+            "Edge-safe runtime active: serial CPU defaults for candidate prep, forecasts, and GPU; "
+            "set ENABLE_PARALLEL_* or ENABLE_GPU_PARALLEL explicitly to opt back in."
+        )
     if _gpu_parallel_enabled():
         logger.info("GPU parallel path available (torch CUDA detected).")
     else:
         logger.info("GPU parallel path unavailable; using CPU threads.")
 
+    orchestration_health_records: list[Dict[str, Any]] = []
+    preprocess_health_records: list[Dict[str, Any]] = []
+    eligibility_snapshot_statuses: list[str] = []
+    quarantined_cycle_count = 0
     for cycle in range(1, cycles + 1):
         logger.info("=== Trading Cycle %s/%s ===", cycle, cycles)
         try:
@@ -3267,19 +3890,47 @@ def main(
 
         window_dataset_id = raw_window.attrs.get("dataset_id") if hasattr(raw_window, "attrs") else None
         window_generator_version = raw_window.attrs.get("generator_version") if hasattr(raw_window, "attrs") else None
-        active_source = data_source_manager.get_active_source()
-        synthetic_only = str(os.getenv("SYNTHETIC_ONLY") or "").strip() == "1"
+        active_source = (
+            str(
+                (raw_window.attrs.get("source") if hasattr(raw_window, "attrs") else None)
+                or (raw_window.attrs.get("data_source") if hasattr(raw_window, "attrs") else None)
+                or data_source_manager.get_active_source()
+            )
+        )
+        synthetic_only = bool(_env_flag("SYNTHETIC_ONLY"))  # consistent with line 3041
         effective_execution_mode = "synthetic" if active_source == "synthetic" or synthetic_only else "live"
         # Historical as-of-date runs replay past market windows; always tag synthetic
         # so trades are excluded from production_closed_trades and orphan checks.
-        # Also propagate to EXECUTION_MODE env var so _generate_time_series_forecast
-        # routes audit files to research/ instead of production/.
         if resolved_as_of_date is not None:
             effective_execution_mode = "synthetic"
-            os.environ["EXECUTION_MODE"] = "synthetic"
+        # Keep lower-level audit routing and any env fallback in lock-step with the
+        # resolved run mode so stale shells cannot leak synthetic/production drift.
+        os.environ["EXECUTION_MODE"] = effective_execution_mode
         last_dataset_id = window_dataset_id or last_dataset_id
         last_generator_version = window_generator_version or last_generator_version
         last_execution_mode = effective_execution_mode
+        ticker_status_snapshot_map: Dict[str, str] = {}
+        eligibility_snapshot_status = "READY"
+        quarantine_new_buys = False
+        quarantine_reason = None
+        try:
+            eligibility_snapshot = compute_eligibility(db_path=trading_engine.db_manager.db_path)
+            ticker_status_snapshot_map = {
+                str(ticker_key).strip().upper(): str(info.get("status") or "LAB_ONLY").strip().upper()
+                for ticker_key, info in (eligibility_snapshot.get("tickers") or {}).items()
+                if str(ticker_key or "").strip()
+            }
+        except Exception:
+            eligibility_snapshot_status = "QUARANTINED"
+            quarantine_new_buys = True
+            quarantine_reason = "Eligibility snapshot computation failed; suppressing new BUY routing."
+            logger.warning(
+                "Failed to compute ticker status snapshot for this cycle; quarantining new BUY routing.",
+                exc_info=True,
+            )
+        eligibility_snapshot_statuses.append(eligibility_snapshot_status)
+        if eligibility_snapshot_status == "QUARANTINED":
+            quarantined_cycle_count += 1
         if cycle == 1:
             try:
                 trading_engine.db_manager.record_run_provenance(
@@ -3293,7 +3944,16 @@ def main(
             except Exception:
                 logger.debug("Failed to record run provenance", exc_info=True)
 
-        interval = getattr(getattr(data_source_manager, "active_extractor", None), "interval", None)
+        active_extractor = None
+        get_extractor = getattr(data_source_manager, "get_extractor", None)
+        if callable(get_extractor):
+            try:
+                active_extractor = get_extractor(active_source)
+            except Exception:
+                active_extractor = None
+        if active_extractor is None:
+            active_extractor = getattr(data_source_manager, "active_extractor", None)
+        interval = getattr(active_extractor, "interval", None)
 
         cycle_results = []
         price_map: Dict[str, float] = {}
@@ -3320,7 +3980,7 @@ def main(
                             "reason": "same_bar",
                             "bar_timestamp": current_bar,
                             "last_processed_bar_timestamp": prev_bar,
-                            "data_source": getattr(data_source_manager.active_extractor, "name", None),
+                            "data_source": active_source,
                         }
                         cycle_results.append(skip_report)
                         recent_signals.append(skip_report)
@@ -3345,6 +4005,7 @@ def main(
         candidates = _build_ticker_candidates(
             pre_entries,
             preprocessor=preprocessor,
+            preprocess_policy=post_preprocess_cfg,
             parallel=parallel_ticker_processing,
             max_workers=parallel_workers,
         )
@@ -3357,10 +4018,8 @@ def main(
             ticker_frame = candidate["frame"]
             quality = candidate["quality"]
             mid_price = candidate["mid_price"]
-            try:
-                data_source = getattr(data_source_manager.active_extractor, "name", None)
-            except Exception:
-                data_source = None
+            preprocess_health = candidate.get("preprocess_health") or {}
+            data_source = active_source
 
             try:
                 trading_engine.db_manager.save_quality_snapshot(
@@ -3373,6 +4032,10 @@ def main(
                     outlier_frac=quality.get("outlier_frac", 0.0),
                     quality_score=quality.get("quality_score", 0.0),
                     source=data_source,
+                    note=(
+                        f"preprocess_status={preprocess_health.get('status') if isinstance(preprocess_health, dict) else 'UNKNOWN'} "
+                        f"quality_tag={preprocess_health.get('quality_tag') if isinstance(preprocess_health, dict) else 'UNKNOWN'}"
+                    ),
                 )
             except Exception:
                 logger.debug("Skipping quality snapshot persistence for %s", ticker)
@@ -3384,9 +4047,12 @@ def main(
                     "missing_pct": quality.get("missing_pct", 1.0),
                     "coverage": quality.get("coverage", 0.0),
                     "outlier_frac": quality.get("outlier_frac", 0.0),
+                    "preprocess_health": preprocess_health,
                     "source": data_source,
                 }
             )
+            if preprocess_health:
+                preprocess_health_records.append(preprocess_health)
 
             if quality.get("quality_score", 0.0) < MIN_QUALITY_SCORE:
                 logger.info(
@@ -3439,6 +4105,7 @@ def main(
                 parallel=True,
                 max_workers=parallel_workers,
                 interval=interval,
+                execution_mode=effective_execution_mode,
             )
 
         for candidate in candidates:
@@ -3472,10 +4139,54 @@ def main(
                     forecast_horizon,
                     ticker=ticker,
                     interval=interval,
+                    execution_mode=effective_execution_mode,
                 )
 
             if not forecast_bundle or current_price is None:
                 logger.warning("Forecasting failed for %s; skipping.", ticker)
+                continue
+
+            evidence_health = {}
+            if isinstance(forecast_bundle, dict):
+                evidence_health = forecast_bundle.get("evidence_health") or {}
+                if not isinstance(evidence_health, dict):
+                    evidence_health = {}
+                if not evidence_health and isinstance(forecast_bundle.get("health"), dict):
+                    health_block = forecast_bundle.get("health") or {}
+                    evidence_health = health_block.get("evidence_health") if isinstance(health_block.get("evidence_health"), dict) else {}
+            if evidence_health:
+                forecast_bundle["evidence_health"] = evidence_health
+            if preprocess_health:
+                forecast_bundle["preprocess_health"] = preprocess_health
+            if preprocess_health and not bool(preprocess_health.get("production_ok", True)):
+                skip_report = {
+                    "ticker": ticker,
+                    "status": "SKIPPED_PREPROCESS_RESEARCH_ONLY",
+                    "reason": preprocess_health.get("reason") or "PREPROCESS_RESEARCH_ONLY",
+                    "quality": quality,
+                    "preprocess_health": preprocess_health,
+                    "evidence_health": evidence_health,
+                    "data_source": data_source,
+                    "mid_price": mid_price,
+                }
+                cycle_results.append(skip_report)
+                recent_signals.append(skip_report)
+                _log_execution_event(run_id, cycle, skip_report)
+                continue
+            if evidence_health and not bool(evidence_health.get("production_ok", True)):
+                skip_report = {
+                    "ticker": ticker,
+                    "status": "SKIPPED_EVIDENCE_RESEARCH_ONLY",
+                    "reason": evidence_health.get("reason") or evidence_health.get("fallback_class") or "EVIDENCE_RESEARCH_ONLY",
+                    "quality": quality,
+                    "preprocess_health": preprocess_health,
+                    "evidence_health": evidence_health,
+                    "data_source": data_source,
+                    "mid_price": mid_price,
+                }
+                cycle_results.append(skip_report)
+                recent_signals.append(skip_report)
+                _log_execution_event(run_id, cycle, skip_report)
                 continue
 
             # Persist forecast snapshots so monitoring health uses fresh data.
@@ -3509,9 +4220,23 @@ def main(
                 barbell_cfg=barbell_cfg,
                 proof_mode=proof_mode,
                 is_intraday=interval is not None and interval != "1d",
+                max_open_lots_per_ticker=max_open_lots_per_ticker,
+                ticker_status_snapshot=ticker_status_snapshot_map.get(symbol),
+                quarantine_new_buys=quarantine_new_buys,
+                quarantine_reason=quarantine_reason,
             )
 
             if execution_report:
+                orchestration_snapshot = _extract_orchestration_health_snapshot(
+                    forecast_bundle,
+                    ticker=ticker,
+                    run_id=run_id,
+                    cycle=cycle,
+                    data_source=data_source,
+                )
+                if orchestration_snapshot:
+                    execution_report["orchestration_health"] = orchestration_snapshot
+                    orchestration_health_records.append(orchestration_snapshot)
                 _attach_signal_context_to_forecast_audit(
                     forecast_bundle=forecast_bundle,
                     execution_report=execution_report,
@@ -3522,6 +4247,10 @@ def main(
                 execution_report["data_source"] = data_source
                 if execution_report.get("mid_price") is None and mid_price is not None:
                     execution_report["mid_price"] = mid_price
+                if preprocess_health:
+                    execution_report["preprocess_health"] = preprocess_health
+                if evidence_health:
+                    execution_report["evidence_health"] = evidence_health
                 cycle_results.append(execution_report)
                 recent_signals.append(execution_report)
                 if execution_report.get("status") == "EXECUTED":
@@ -3743,14 +4472,54 @@ def main(
             forecaster_health = {}
             quant_health = {}
 
+    orchestration_health = _summarize_orchestration_health(orchestration_health_records)
+    preprocess_health = _summarize_preprocess_health(preprocess_health_records)
+    latest_orchestration = orchestration_health.get("latest") if isinstance(orchestration_health, dict) else {}
+    latest_orchestration = latest_orchestration if isinstance(latest_orchestration, dict) else {}
+    forecaster_health["evidence_health"] = {
+        "status": "OK" if latest_orchestration.get("evidence_production_ok", True) else "WARN",
+        "source_kind": latest_orchestration.get("evidence_source_kind"),
+        "freshness_status": latest_orchestration.get("evidence_freshness_status"),
+        "oos_metrics_available": latest_orchestration.get("evidence_oos_metrics_available"),
+        "rmse_rank_active": latest_orchestration.get("evidence_rmse_rank_active"),
+        "fallback_class": latest_orchestration.get("evidence_fallback_class"),
+        "production_ok": latest_orchestration.get("evidence_production_ok"),
+        "issues": list(orchestration_health.get("issues") or []),
+    }
+
     quality_summary = {}
     if quality_records:
         scores = [q["quality_score"] for q in quality_records if q.get("quality_score") is not None]
         if scores:
+            preprocess_status_counts: Dict[str, int] = {}
+            preprocess_quality_tag_counts: Dict[str, int] = {}
+            preprocess_production_ok = 0
+            preprocess_research_only = 0
+            for record in quality_records:
+                preprocess = record.get("preprocess_health") or {}
+                if not isinstance(preprocess, dict):
+                    continue
+                status = str(preprocess.get("status") or "UNKNOWN").upper()
+                preprocess_status_counts[status] = preprocess_status_counts.get(status, 0) + 1
+                quality_tag = str(preprocess.get("quality_tag") or "UNKNOWN").upper()
+                preprocess_quality_tag_counts[quality_tag] = preprocess_quality_tag_counts.get(quality_tag, 0) + 1
+                if preprocess.get("production_ok") is True:
+                    preprocess_production_ok += 1
+                else:
+                    preprocess_research_only += 1
             quality_summary = {
                 "average": sum(scores) / len(scores),
                 "minimum": min(scores),
                 "records": quality_records,
+                "preprocess": {
+                    "status": preprocess_health.get("status"),
+                    "summary": preprocess_health.get("summary") or {},
+                    "issues": preprocess_health.get("issues") or [],
+                    "status_counts": preprocess_status_counts,
+                    "quality_tag_counts": preprocess_quality_tag_counts,
+                    "production_ok_runs": preprocess_production_ok,
+                    "research_only_runs": preprocess_research_only,
+                },
             }
 
     # Emit dashboard snapshot for visualization
@@ -3843,6 +4612,17 @@ def main(
     except Exception:
         trade_events = []
 
+    runtime_status_record = {
+        "eligibility_snapshot_status": "QUARANTINED"
+        if quarantined_cycle_count > 0
+        else "READY",
+        "eligibility_snapshot_statuses": eligibility_snapshot_statuses,
+        "quarantined_cycle_count": quarantined_cycle_count,
+        "quarantine_reason": (
+            "eligibility_snapshot_compute_failed" if quarantined_cycle_count > 0 else None
+        ),
+    }
+
     _emit_dashboard_json(
         path=RUN_AUTO_TRADER_ARTIFACT_PATH,
         meta=meta,
@@ -3856,8 +4636,11 @@ def main(
         win_rate=win_rate,
         latencies=latencies,
         quality_summary=quality_summary,
+        preprocess_health=preprocess_health,
         forecaster_health=forecaster_health,
         quant_validation_health=quant_health,
+        orchestration_health=orchestration_health,
+        runtime_status=runtime_status_record,
     )
     _emit_dashboard_png(
         path=ROOT_PATH / "visualizations" / "dashboard_snapshot.png",
@@ -3882,6 +4665,7 @@ def main(
         cash_ratio=cash_ratio,
         forecaster_health=forecaster_health,
         quant_health=quant_health,
+        orchestration_health=orchestration_health,
     )
     run_summary_record = {
         "run_id": run_id,
@@ -3918,7 +4702,9 @@ def main(
             "metrics": forecaster_health.get("metrics") if isinstance(forecaster_health, dict) else {},
             "status": forecaster_health.get("status") if isinstance(forecaster_health, dict) else {},
         },
+        "orchestration": orchestration_health,
         "quant_validation": quant_health,
+        "runtime_status": runtime_status_record,
         "next_actions": action_plan,
     }
     _log_run_summary(run_summary_record)

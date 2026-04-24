@@ -48,6 +48,7 @@ def test_bar_timestamp_gate_skips_same_bar(tmp_path: Path) -> None:
 
 def test_bar_aware_loop_skips_second_cycle(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     calls = {"execute": 0}
+    captured_modes: list[str | None] = []
     bar_ts = pd.Timestamp("2024-01-10")
     raw_window = _make_raw_window(bar_ts)
 
@@ -91,8 +92,25 @@ def test_bar_aware_loop_skips_second_cycle(monkeypatch: pytest.MonkeyPatch, tmp_
     monkeypatch.setattr(run_auto_trader, "DataSourceManager", DummyDataSourceManager)
     monkeypatch.setattr(run_auto_trader, "_prepare_market_window", lambda *_args, **_kwargs: raw_window)
     monkeypatch.setattr(run_auto_trader, "_validate_market_window", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        run_auto_trader.Preprocessor,
+        "validate_post_preprocess",
+        lambda self, raw_data, processed_data, **kwargs: {
+            "status": "PASS",
+            "reason": "TEST_OVERRIDE",
+            "quality_tag": "PASS",
+            "production_ok": True,
+            "research_ok": True,
+            "raw_length": len(raw_data),
+            "processed_length": len(processed_data),
+            "usable_bars": len(processed_data),
+            "imputed_fraction": 0.0,
+            "padding_fraction": 0.0,
+        },
+    )
 
     def fake_forecast(price_frame: pd.DataFrame, horizon: int, **_kwargs):
+        captured_modes.append(_kwargs.get("execution_mode"))
         series = pd.Series(
             [101.0, 102.0],
             index=pd.date_range("2024-01-11", periods=2, freq="D"),
@@ -125,3 +143,4 @@ def test_bar_aware_loop_skips_second_cycle(monkeypatch: pytest.MonkeyPatch, tmp_
         verbose=False,
     )
     assert calls["execute"] == 1
+    assert captured_modes == ["live"]

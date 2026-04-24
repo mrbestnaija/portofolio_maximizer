@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 
 from scripts.run_live_denominator_overnight import (
+    _forecast_audit_sanitization_cmd,
     _seconds_until_next_weekday,
     extract_fresh_trade_signals,
 )
@@ -123,3 +124,17 @@ def test_seconds_until_next_weekday_skips_weekends() -> None:
 
     assert _seconds_until_next_weekday(saturday) == 172800
     assert _seconds_until_next_weekday(monday) == 0
+
+
+def test_forecast_audit_sanitization_command_targets_production_root(tmp_path: Path) -> None:
+    cmd = _forecast_audit_sanitization_cmd(tmp_path / "logs" / "forecast_audits")
+
+    audit_dir = Path(cmd[cmd.index("--audit-dir") + 1])
+    eval_dir = Path(cmd[cmd.index("--eval-audit-dir") + 1])
+    quarantine_dir = Path(cmd[cmd.index("--quarantine-dir") + 1])
+
+    assert audit_dir.name == "production"
+    assert audit_dir.parent.name == "forecast_audits"
+    assert eval_dir.name == "production_eval"
+    assert quarantine_dir.name == "quarantine"
+    assert cmd[-1] == "--apply"

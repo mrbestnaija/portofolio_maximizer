@@ -19,6 +19,18 @@ OpenClaw loads workspace skills from `<workspace>/skills`. This repo ships a wor
 
 Once your OpenClaw workspace points at the repo root, the skill becomes available to guide safe commands (tests, audits, offline runs) without bypassing the project's TS-first and risk guardrails.
 
+## Local Model Policy
+
+OpenClaw model selection remains conservative by default:
+
+- `qwen3:8b` stays the default tool-calling primary.
+- `qwen3.5:*` models are only allowed into the safe chain when an explicit benchmark-policy file approves them.
+- Default policy path: `logs/openclaw_model_policy.json`
+- Override path with `OPENCLAW_QWEN35_POLICY_PATH`
+- Temporary fallback-only override: `OPENCLAW_ALLOW_QWEN35_FALLBACK=1`
+
+The helper script `scripts/openclaw_models.py` prints the resolved policy in `status` output and only promotes an approved `qwen3.5` primary when the policy says it is benchmark-approved.
+
 ## OpenClaw Notifications
 
 If you have the OpenClaw CLI installed/configured, Portfolio Maximizer can send notifications via:
@@ -78,25 +90,24 @@ The runtime status payload now includes explicit `openclaw_exec_env` signals:
 Prompt-mode runs (`python scripts/openclaw_notify.py --prompt ...`) now enforce a guard in
 `utils/openclaw_cli.py` before any `openclaw agent` call:
 
-- Blocks high-risk requests unless approval token is present:
+ - Blocks high-risk requests unless trusted approval is passed for the specific run:
   - secret exfiltration/entry requests
   - irreversible financial/account actions
   - CAPTCHA bypass requests
-- Prefixes each agent request with `[PMX_AUTONOMY_POLICY]` so untrusted
-  webpage/email instructions are treated as potential prompt injection.
+- High-risk execution requires trusted approval for the specific run via
+  `--approve-high-risk` or `OPENCLAW_APPROVE_HIGH_RISK=1`.
+- Prefixes each agent request with `[PMX_AUTONOMY_POLICY]`; user-supplied
+  policy markers are inert text and do not short-circuit the guard.
 
 Guard env vars:
 - `OPENCLAW_AUTONOMY_GUARD_ENABLED` (default: `1`)
-- `OPENCLAW_AUTONOMY_REQUIRE_APPROVAL_TOKEN` (default: `1`)
-- `OPENCLAW_AUTONOMY_APPROVAL_TOKEN` (default: `PMX_APPROVE_HIGH_RISK`)
-- `OPENCLAW_AUTONOMY_POLICY_PREFIX_ENABLED` (default: `1`)
+- `OPENCLAW_APPROVE_HIGH_RISK` (default: `0`, set only for the specific run that needs trusted approval)
 - `OPENCLAW_AUTONOMY_BLOCK_INJECTION_PATTERNS` (default: `0`, recommended `1` for unattended runs)
 
 Recommended hardened profile for autonomous hosts:
 - `OPENCLAW_AUTONOMY_GUARD_ENABLED=1`
-- `OPENCLAW_AUTONOMY_REQUIRE_APPROVAL_TOKEN=1`
-- `OPENCLAW_AUTONOMY_APPROVAL_TOKEN=<non-trivial token>`
 - `OPENCLAW_AUTONOMY_BLOCK_INJECTION_PATTERNS=1`
+- `OPENCLAW_APPROVE_HIGH_RISK=1` only for the specific run that needs trusted approval
 
 ### Tavily API (Preferred Over Brave For Quota-Limited Search)
 
@@ -210,6 +221,12 @@ Practical prompt pattern:
 
 When thresholds are exceeded, the error monitor will save a file alert under `logs/alerts/` and also deliver a truncated summary via OpenClaw (if configured).
 
+The daily 8:30 AM Ticker Health Monitor also reads `logs/automation/tp_contingency_latest.json`,
+which is produced by `scripts/outcome_linkage_attribution_report.py` after the canonical
+snapshot step. It alerts when the highest-SNR posterior TAKE_PROFIT mean stays below the
+overall posterior TAKE_PROFIT mean for two consecutive regenerations, because that is the
+earliest signal that the TAKE_PROFIT edge is degrading even if headline PnL still looks stable.
+
 ### Production Audit Gate Alerts
 
 `scripts/production_audit_gate.py` can send its PASS/FAIL summary via OpenClaw.
@@ -266,7 +283,8 @@ OpenClaw supports multiple channels. On Windows, the most reliable "remote" opti
 
 1. Set the channel token(s) in `.env` (do not commit):
 
-- `TELEGRAM_BOT_TOKEN` (Telegram)
+- `TELEGRAM_BOT_TOKEN` (Telegram, preferred)
+- `OPENCLAW_TELEGRAM_BOT_TOKEN` (legacy alias accepted)
 - `DISCORD_BOT_TOKEN` (Discord)
 - `SLACK_BOT_TOKEN` + `SLACK_APP_TOKEN` (Slack, if you use it)
 
@@ -690,7 +708,7 @@ Jobs are stored in `~/.openclaw/cron/jobs.json` (not in the repo). Each job uses
 | Production Gate Check | P0 | `0 7 * * *` (daily 7 AM) | `run_production_audit_gate` tool (preferred) / `python scripts/production_audit_gate.py` fallback |
 | Quant Validation Health | P0 | `30 7 * * *` (daily 7:30 AM) | Inline Python analyzing `logs/signals/quant_validation.jsonl` |
 | Signal Linkage Monitor | P1 | `0 8 * * *` (daily 8 AM) | Inline Python querying DB for NULL signal_id, orphans |
-| Ticker Health Monitor | P1 | `30 8 * * *` (daily 8:30 AM) | Inline Python checking per-ticker PnL and consecutive losses |
+| Ticker Health Monitor | P1 | `30 8 * * *` (daily 8:30 AM) | Inline Python checking per-ticker PnL, consecutive losses, and `logs/automation/tp_contingency_latest.json` TAKE_PROFIT calibration drift |
 | GARCH Unit-Root Guard | P2 | `0 9 * * 1` (Mon 9 AM) | Inline Python scanning forecast audits for alpha+beta >= 0.98 |
 | Overnight Hold Monitor | P2 | `0 9 * * 5` (Fri 9 AM) | Inline Python comparing intraday vs overnight PnL |
 | Model Training Autopilot | P1 | `15 */6 * * *` (every 6h) | `python scripts/openclaw_training_autopilot.py --benchmark-factor 0.989` (detaches `run_training_priority_cycle.py` when below benchmarks) |
@@ -1064,9 +1082,10 @@ agent" to route to the `training` agent instead (via explicit agentId).
 
 **Safety guardrails for remote coding tasks:**
 
-- Prompts are prefixed with `[PMX_AUTONOMY_POLICY]` (autonomy guard, see above).
-- High-risk actions (force push, drop table, delete branch) require
-  `PMX_APPROVE_HIGH_RISK` token in the message.
+- Prompts are always prefixed with `[PMX_AUTONOMY_POLICY]` (autonomy guard, see above).
+- High-risk actions (force push, drop table, delete branch) require trusted
+  approval for the specific run via `--approve-high-risk` or
+  `OPENCLAW_APPROVE_HIGH_RISK=1`.
 - Git push requires explicit confirmation -- the agent will ask before pushing.
 - Keep `OPENCLAW_AUTONOMY_BLOCK_INJECTION_PATTERNS=1` for unattended sessions.
 

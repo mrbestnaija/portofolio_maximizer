@@ -1292,6 +1292,11 @@ def execute_pipeline(
                     else:
                         raise RuntimeError("Data extraction failed - empty dataset")
 
+                if hasattr(raw_data, "attrs"):
+                    provenance_source = raw_data.attrs.get("source") or raw_data.attrs.get("data_source")
+                    if provenance_source:
+                        extraction_source = str(provenance_source)
+
                 logger.info(f"OK Extracted {len(raw_data)} rows from {len(ticker_list)} ticker(s)")
                 logger.info(f"  Source: {extraction_source}")
                 if (
@@ -1403,6 +1408,58 @@ def execute_pipeline(
                 processed = filled
                 logger.debug("  Missing data handled (method=%s)", missing_method)
 
+                validation_cfg = (preprocessing_cfg.get("validation") or {}) if isinstance(preprocessing_cfg, dict) else {}
+                post_preprocess_cfg = (validation_cfg.get("post_preprocess") or {}) if isinstance(validation_cfg, dict) else {}
+                post_preprocess_enabled = bool(post_preprocess_cfg.get("enabled", True))
+                preprocess_health: Dict[str, Any] = {
+                    "status": "SKIP",
+                    "reason": "DISABLED",
+                    "quality_tag": "SKIP",
+                    "production_ok": False,
+                    "research_ok": True,
+                }
+                if post_preprocess_enabled:
+                    try:
+                        preprocess_health = processor.validate_post_preprocess(
+                            raw_data,
+                            processed,
+                            min_usable_bars=int(post_preprocess_cfg.get("min_usable_bars", 120) or 120),
+                            max_imputed_fraction=float(post_preprocess_cfg.get("max_imputed_fraction", 0.30) or 0.30),
+                            max_padding_fraction=float(post_preprocess_cfg.get("max_padding_fraction", 0.20) or 0.20),
+                            on_failure=str(post_preprocess_cfg.get("on_failure", "warn") or "warn"),
+                        )
+                    except Exception as exc:
+                        preprocess_health = {
+                            "status": "FAIL",
+                            "reason": f"VALIDATOR_ERROR:{exc}",
+                            "quality_tag": "BLOCKED",
+                            "production_ok": False,
+                            "research_ok": False,
+                        }
+                        logger.warning("Post-preprocess validation failed to run: %s", exc)
+
+                    if preprocess_health.get("status") == "FAIL":
+                        message = f"Post-preprocess validation failed: {preprocess_health.get('reason')}"
+                        if str(post_preprocess_cfg.get("on_failure", "raise") or "raise").strip().lower() == "raise":
+                            raise ValueError(message)
+                        logger.warning(message)
+                    elif not preprocess_health.get("production_ok", False):
+                        logger.warning(
+                            "Preprocess health marks window research-only (tag=%s, reason=%s)",
+                            preprocess_health.get("quality_tag"),
+                            preprocess_health.get("reason"),
+                        )
+                    else:
+                        logger.info(
+                            "OK Post-preprocess validation passed (imputed=%.1f%% padding=%.1f%%)",
+                            float(preprocess_health.get("imputed_fraction", 0.0)) * 100.0,
+                            float(preprocess_health.get("padding_fraction", 0.0)) * 100.0,
+                        )
+                else:
+                    logger.info("Post-preprocess validation disabled by configuration")
+
+                processed.attrs["preprocess_health"] = preprocess_health
+
                 normalization_cfg = (
                     (preprocessing_cfg.get("normalization") or {}) if isinstance(preprocessing_cfg, dict) else {}
                 )
@@ -1426,6 +1483,12 @@ def execute_pipeline(
                         'pipeline_id': pipeline_id,
                         'missing_method': missing_method,
                         'normalized': False,
+                        'post_preprocess_status': preprocess_health.get("status"),
+                        'post_preprocess_reason': preprocess_health.get("reason"),
+                        'post_preprocess_quality_tag': preprocess_health.get("quality_tag"),
+                        'post_preprocess_production_ok': preprocess_health.get("production_ok"),
+                        'post_preprocess_imputed_fraction': preprocess_health.get("imputed_fraction"),
+                        'post_preprocess_padding_fraction': preprocess_health.get("padding_fraction"),
                     },
                     run_id=pipeline_id
                 )

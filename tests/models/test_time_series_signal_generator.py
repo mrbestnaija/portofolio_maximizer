@@ -657,15 +657,15 @@ class TestTimeSeriesSignalGenerator:
             min_expected_return=0.003,
             max_risk_score=0.7,
             per_ticker_thresholds={
-                "AAPL": {"min_expected_return": 0.01},
+                "AAPL": {"min_expected_return": 0.04},  # 4% per-ticker floor blocks AAPL
             },
             quant_validation_config={"enabled": False},
         )
 
-        # Use a stronger return (0.7%) so MSFT (min_return=0.3%) passes confidence gate
-        # even with snr_score=0.0 (H6 fix: SNR=None is now pessimistic). AAPL's higher
-        # per-ticker min_return (1.0%) still blocks it.
-        forecast = pd.Series([100.7, 100.7, 100.7])
+        # Use 3% return so MSFT (min_return=0.3%) passes the confidence gate with the
+        # calibrated edge_score formula (full credit at 10x threshold = 3%). AAPL's
+        # per-ticker min_return (4%) still blocks it via the min_return gate.
+        forecast = pd.Series([103.0, 103.0, 103.0])
         forecast_bundle = {
             "horizon": 30,
             "ensemble_forecast": {"forecast": forecast},
@@ -708,9 +708,11 @@ class TestTimeSeriesSignalGenerator:
             quant_validation_config={"enabled": False},
         )
 
-        # Use a stronger return (-0.7%) so the SELL signal passes confidence gate
-        # even with snr_score=0.0 (H6 fix: SNR=None is now pessimistic 0.0 not neutral 0.5).
-        forecast = pd.Series([99.3, 99.3, 99.3])
+        # Use -3% return so the SELL signal clears the confidence gate with the
+        # calibrated edge_score divisor (/10.0). At 0.003 min_return, 10x threshold
+        # = 3%, so net_return 2.9% = edge_ratio 9.7 → edge_score 0.97 → conf passes 0.55
+        # even with snr_score=0.0 (H6 fix: SNR=None is pessimistic 0.0).
+        forecast = pd.Series([97.0, 97.0, 97.0])
         forecast_bundle = {
             "horizon": 30,
             "ensemble_forecast": {"forecast": forecast},
@@ -738,8 +740,8 @@ class TestTimeSeriesSignalGenerator:
         ctx = signal.provenance.get("decision_context") or {}
         assert signal.action == "SELL"
         assert ctx.get("roundtrip_cost_bps") == pytest.approx(10.0)
-        assert ctx.get("expected_return") == pytest.approx(-0.007)
-        assert ctx.get("expected_return_net") == pytest.approx(-0.006)
+        assert ctx.get("expected_return") == pytest.approx(-0.030)
+        assert ctx.get("expected_return_net") == pytest.approx(-0.029)
         # Net should be closer to zero than gross for SELL signals.
         assert ctx["expected_return_net"] > ctx["expected_return"]
 
@@ -1630,7 +1632,7 @@ class TestATRStopLoss:
         }, index=dates)
 
     def test_atr_stop_uses_bar_data(self):
-        """ATR-based stop should equal current_price - ATR*1.5 for BUY."""
+        """ATR-based stop should equal current_price - ATR*2.0 for BUY."""
         gen = self._make_generator()
         price = 100.0
         bar_range = 2.0  # High-Low range per bar; ATR(14) ≈ 2.0
@@ -1647,7 +1649,7 @@ class TestATRStopLoss:
             action="BUY",
             market_data=market_data,
         )
-        expected_stop = price * (1 - max((atr * 1.5) / price, 0.015))
+        expected_stop = price * (1 - max((atr * 2.0) / price, 0.015))
         assert stop == pytest.approx(expected_stop, rel=1e-6)
 
     def test_atr_stop_fallback_no_ohlc(self):
@@ -2074,12 +2076,12 @@ class TestSNRNonePessimisticFallback:
         )
 
     def test_snr_none_does_not_credit_neutral(self) -> None:
-        """conf(snr=None) < conf(snr=1.5) — snr=None uses score=0.0, snr=1.5 uses score=0.667.
+        """conf(snr=None) < conf(snr=1.5) — snr=None uses score=0.0, snr=1.5 uses score=0.333.
         Note: snr=0.5 maps to score=0.0 (same as None), so comparison must use snr > 0.5."""
         conf_none = self._conf(None)
-        conf_moderate = self._conf(1.5)  # snr_score = clamp01((1.5-0.5)/1.5) = 0.667
+        conf_moderate = self._conf(1.5)  # snr_score = clamp01((1.5-0.5)/3.0) = 0.333
         assert conf_none < conf_moderate, (
-            f"SNR=None (score=0.0) must be strictly lower than snr=1.5 (score=0.667); "
+            f"SNR=None (score=0.0) must be strictly lower than snr=1.5 (score=0.333); "
             f"got none={conf_none:.4f}, snr_moderate={conf_moderate:.4f}"
         )
 
@@ -2223,3 +2225,210 @@ class TestCrisisRegimePathRiskBlock:
             bucket="spec",
         )
         assert "crisis_regime_path_risk_block" not in hard_gates
+
+
+class TestEdgeScoreDiscrimination:
+    """Edge score must NOT saturate at 3x threshold (0.6% at 20bps min).
+
+    Pre-fix: divisor was 3.0, so edge_score=1.0 for any return > 0.6%.
+    Post-fix: divisor is 10.0, so full credit at 2.0% (10x the 20bps minimum).
+    This means live BUY signals with 1-5% expected_return are now discriminated.
+    """
+
+    _BASE_KWARGS = dict(
+        expected_return=0.02,
+        min_expected_return=0.002,  # 20bps — Phase 7.14 production value
+        volatility=0.20,
+        model_agreement=0.80,
+        diagnostics_score=0.70,
+        snr=2.0,
+        ticker="TEST",
+    )
+
+    def _conf(self, net_trade_return: float) -> float:
+        from models.time_series_signal_generator import TimeSeriesSignalGenerator
+        gen = TimeSeriesSignalGenerator(use_volatility_filter=True)
+        return gen._calculate_confidence(net_trade_return=net_trade_return, **self._BASE_KWARGS)
+
+    def test_edge_score_not_saturated_at_1pct_return(self) -> None:
+        """1% return (5x 20bps threshold) must give edge_score < 1.0 (was 1.0 pre-fix).
+
+        With divisor=10.0: edge_ratio = 0.01/0.002 = 5.0, edge_score = clamp01(5/10) = 0.5.
+        The 40% component weight means signals in the 1-2% return range are now
+        discriminated from each other rather than uniformly capped at full credit.
+        """
+        conf_1pct = self._conf(0.01)  # 1% return, 5x threshold
+        conf_2pct = self._conf(0.02)  # 2% return, 10x threshold (full credit)
+        assert conf_1pct < conf_2pct, (
+            f"1% return should have lower confidence than 2% (edge still growing); "
+            f"got conf(1%)={conf_1pct:.4f}, conf(2%)={conf_2pct:.4f}"
+        )
+
+    def test_edge_score_full_credit_at_10x_threshold(self) -> None:
+        """2% return (10x 20bps threshold) must saturate at edge_score=1.0.
+
+        With divisor=10.0: edge_ratio = 0.02/0.002 = 10.0, edge_score = clamp01(10/10) = 1.0.
+        5% return (25x) also saturates; both should produce identical confidence.
+        """
+        conf_2pct = self._conf(0.02)
+        conf_5pct = self._conf(0.05)  # 25x threshold — also saturates at 1.0
+        assert abs(conf_2pct - conf_5pct) < 0.001, (
+            f"Both 2% and 5% return should produce identical confidence (edge_score=1.0); "
+            f"got conf(2%)={conf_2pct:.4f}, conf(5%)={conf_5pct:.4f}"
+        )
+
+
+class TestSNRAnchorCalibration:
+    """SNR upper anchor raised from 2.0 to 3.5 based on observed live data range (0-7.13).
+
+    Pre-fix: snr_score = clamp01((snr - 0.5) / 1.5) -> full credit at SNR=2.0.
+    Post-fix: snr_score = clamp01((snr - 0.5) / 3.0) -> full credit at SNR=3.5.
+    """
+
+    _BASE_KWARGS = dict(
+        expected_return=0.05,
+        net_trade_return=0.05,
+        min_expected_return=0.002,
+        volatility=0.20,
+        model_agreement=0.80,
+        diagnostics_score=0.70,
+        ticker="TEST",
+    )
+
+    def _conf(self, snr: float | None) -> float:
+        from models.time_series_signal_generator import TimeSeriesSignalGenerator
+        gen = TimeSeriesSignalGenerator(use_volatility_filter=True)
+        return gen._calculate_confidence(snr=snr, **self._BASE_KWARGS)
+
+    def test_snr_at_gate_threshold_gives_modest_score(self) -> None:
+        """SNR=1.5 (routing gate minimum) must yield snr_score ~0.333, not 0.667.
+
+        Pre-fix: (1.5-0.5)/1.5 = 0.667 — signals barely past gate got 2/3 SNR credit.
+        Post-fix: (1.5-0.5)/3.0 = 0.333 — correctly modest for gate-threshold signals.
+        SNR=3.5 (full credit) must be meaningfully better than gate-threshold confidence.
+        """
+        conf_gate = self._conf(1.5)
+        conf_strong = self._conf(3.5)
+        assert conf_strong > conf_gate, (
+            f"SNR=3.5 (full credit) must exceed SNR=1.5 (gate threshold); "
+            f"got conf(1.5)={conf_gate:.4f}, conf(3.5)={conf_strong:.4f}"
+        )
+        margin = conf_strong - conf_gate
+        assert margin > 0.05, (
+            f"Expected >5pp margin between SNR=1.5 and SNR=3.5; got {margin:.4f}"
+        )
+
+    def test_snr_upper_anchor_at_3_5(self) -> None:
+        """SNR=3.5 and SNR=5.0 should produce identical confidence (both saturate at 1.0).
+
+        Pre-fix: saturation at SNR=2.0; SNR=2.0 and SNR=5.0 were identical.
+        Post-fix: saturation at SNR=3.5; SNR=3.5 and SNR=5.0 are identical.
+        """
+        conf_3_5 = self._conf(3.5)
+        conf_5_0 = self._conf(5.0)
+        assert abs(conf_3_5 - conf_5_0) < 0.001, (
+            f"SNR=3.5 and SNR=5.0 should both saturate at snr_score=1.0; "
+            f"got conf(3.5)={conf_3_5:.4f}, conf(5.0)={conf_5_0:.4f}"
+        )
+
+
+class TestSignalLevelOverrides:
+    """Tests for _build_signal_level_overrides() — forward-looking omega/payoff injection."""
+
+    def _make_signal(self, **kwargs) -> "TimeSeriesSignal":
+        from models.time_series_signal_generator import TimeSeriesSignal
+        defaults = dict(
+            ticker="AAPL",
+            action="BUY",
+            confidence=0.7,
+            entry_price=100.0,
+            target_price=103.0,
+            stop_loss=98.5,
+        )
+        defaults.update(kwargs)
+        return TimeSeriesSignal(**defaults)
+
+    def test_overrides_inject_forward_omega_into_metrics(self) -> None:
+        """Valid BUY signal with entry/target/stop returns omega_ratio and payoff_asymmetry."""
+        from models.time_series_signal_generator import TimeSeriesSignalGenerator
+        signal = self._make_signal(entry_price=100.0, target_price=103.0, stop_loss=98.5, confidence=0.7)
+        result = TimeSeriesSignalGenerator._build_signal_level_overrides(signal)
+        assert "omega_ratio" in result, "omega_ratio must be present for valid BUY signal"
+        assert "payoff_asymmetry" in result, "payoff_asymmetry must be present for valid BUY signal"
+        assert result["omega_ratio"] is not None
+        assert result["payoff_asymmetry"] is not None
+
+    def test_overrides_payoff_asymmetry_is_forward_rr(self) -> None:
+        """payoff_asymmetry = upside_pct / stop_pct (forward R:R), not historical avg_win/avg_loss.
+
+        entry=100, target=104, stop=98 -> upside=4%, downside=2% -> R:R = 2.0.
+        """
+        from models.time_series_signal_generator import TimeSeriesSignalGenerator
+        signal = self._make_signal(entry_price=100.0, target_price=104.0, stop_loss=98.0, confidence=0.65)
+        result = TimeSeriesSignalGenerator._build_signal_level_overrides(signal)
+        expected_rr = (104.0 - 100.0) / 100.0 / ((100.0 - 98.0) / 100.0)  # 4% / 2% = 2.0
+        assert "payoff_asymmetry" in result
+        assert abs(result["payoff_asymmetry"] - expected_rr) < 1e-9, (
+            f"Expected forward R:R={expected_rr}, got {result['payoff_asymmetry']}"
+        )
+
+    def test_overrides_merged_into_metrics_before_domain_utility(self) -> None:
+        """_build_quant_success_profile must use forward omega_ratio from signal overrides.
+
+        The forward-computed omega_ratio (from Bernoulli distribution) must match what
+        _build_signal_level_overrides returns directly, confirming the merge happens
+        before domain utility scoring.
+        """
+        import pandas as pd
+        import numpy as np
+        from models.time_series_signal_generator import TimeSeriesSignalGenerator, TimeSeriesSignal
+
+        # Build minimal market_data so _build_quant_success_profile doesn't bail out early.
+        np.random.seed(42)
+        n = 130
+        prices = 100.0 + np.cumsum(np.random.randn(n) * 0.5)
+        prices = np.maximum(prices, 1.0)
+        market_data = pd.DataFrame({"Close": prices})
+
+        signal = TimeSeriesSignal(
+            ticker="AAPL",
+            action="BUY",
+            confidence=0.65,
+            entry_price=100.0,
+            target_price=104.0,
+            stop_loss=98.0,
+        )
+
+        # Compute expected forward omega directly.
+        expected_overrides = TimeSeriesSignalGenerator._build_signal_level_overrides(signal)
+        assert "omega_ratio" in expected_overrides, "Precondition: overrides must contain omega_ratio"
+
+        gen = TimeSeriesSignalGenerator(
+            use_volatility_filter=False,
+            quant_validation_config={"enabled": True},
+        )
+        profile = gen._build_quant_success_profile("AAPL", market_data, signal)
+        assert profile is not None, "_build_quant_success_profile returned None"
+        assert "omega_ratio" in profile.get("metrics", profile), (
+            "omega_ratio must be present in quant success profile"
+        )
+        metrics = profile.get("metrics", profile)
+        assert abs(metrics["omega_ratio"] - expected_overrides["omega_ratio"]) < 1e-9, (
+            f"Profile omega_ratio {metrics['omega_ratio']} != forward override {expected_overrides['omega_ratio']}"
+        )
+
+    def test_overrides_absent_when_signal_missing_stop(self) -> None:
+        """Signal missing stop_loss must return empty dict (graceful degradation)."""
+        from models.time_series_signal_generator import TimeSeriesSignalGenerator, TimeSeriesSignal
+        signal = TimeSeriesSignal(
+            ticker="AAPL",
+            action="BUY",
+            confidence=0.65,
+            entry_price=100.0,
+            target_price=104.0,
+            stop_loss=None,
+        )
+        result = TimeSeriesSignalGenerator._build_signal_level_overrides(signal)
+        assert result == {} or "omega_ratio" not in result, (
+            "Missing stop_loss must yield empty overrides or no omega_ratio"
+        )

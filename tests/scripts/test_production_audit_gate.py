@@ -226,6 +226,54 @@ def test_binding_safe_lift_summary_retains_freshness_fields_only() -> None:
     assert "effective_audits" not in safe
 
 
+def test_infer_openclaw_listener_fallback_target_ignores_whatsapp_phone_number(monkeypatch: pytest.MonkeyPatch) -> None:
+    import scripts.production_audit_gate as mod
+
+    monkeypatch.setattr(
+        mod,
+        "load_cron_jobs_payload",
+        lambda _path: (
+            {
+                "jobs": [
+                    {
+                        "delivery": {
+                            "channel": "whatsapp",
+                            "fallback": {"channel": "telegram", "to": "+2348061573767"},
+                        }
+                    }
+                ]
+            },
+            None,
+        ),
+    )
+
+    assert mod._infer_openclaw_listener_fallback_target() is None
+
+
+def test_infer_openclaw_listener_fallback_target_accepts_telegram_chat_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    import scripts.production_audit_gate as mod
+
+    monkeypatch.setattr(
+        mod,
+        "load_cron_jobs_payload",
+        lambda _path: (
+            {
+                "jobs": [
+                    {
+                        "delivery": {
+                            "channel": "whatsapp",
+                            "fallback": {"channel": "telegram", "to": "telegram:6515478488"},
+                        }
+                    }
+                ]
+            },
+            None,
+        ),
+    )
+
+    assert mod._infer_openclaw_listener_fallback_target() == "telegram:6515478488"
+
+
 def test_main_prefers_structured_summary_over_stdout_metrics(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1218,7 +1266,7 @@ def test_inconclusive_allowed_emits_strict_false_even_when_legacy_phase3_ready(
     assert payload["readiness"]["posture"] == "WARMUP_COVERED_PASS"
 
 
-def test_warmup_covered_posture_detects_proof_and_linkage_gaps_even_when_strict_true(
+def test_warmup_covered_posture_fails_closed_when_linkage_and_proof_gaps_remain(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import scripts.production_audit_gate as mod
@@ -1360,15 +1408,13 @@ def test_warmup_covered_posture_detects_proof_and_linkage_gaps_even_when_strict_
     assert rc == 0
     payload = mod._safe_load_json(output_json)
     assert payload is not None
-    assert payload["phase3_strict_ready"] is True
-    assert payload["posture"] == "WARMUP_COVERED_PASS"
-    assert payload["readiness"]["posture"] == "WARMUP_COVERED_PASS"
+    assert payload["phase3_ready"] is False
+    assert payload["phase3_strict_ready"] is False
+    assert payload["posture"] == "FAIL"
+    assert payload["readiness"]["posture"] == "FAIL"
     assert payload["readiness"]["proof_evidence_ready"] is False
     assert payload["readiness"]["linkage_full_thresholds_pass"] is False
-    assert set(payload["covered_state_reasons"]) == {
-        "proof_evidence_incomplete",
-        "linkage_warmup_exemption",
-    }
+    assert payload["covered_state_reasons"] == []
 
 
 def test_compute_lifecycle_integrity_excludes_legacy_trades(tmp_path: Path) -> None:
@@ -1661,8 +1707,8 @@ def test_evidence_hygiene_excludes_execution_rejected_from_dirty_count() -> None
     assert max(0, inv - er) == 0
 
 
-def test_evidence_hygiene_keeps_misrouted_rmse_only_records_dirty() -> None:
-    """Explicit RMSE_ONLY artifacts in production remain hygiene blockers."""
+def test_evidence_hygiene_excludes_misrouted_rmse_only_records_from_dirty_invalids() -> None:
+    """Explicit RMSE_ONLY artifacts stay visible but do not count as dirty live-trade invalids."""
     import scripts.production_audit_gate as mod
 
     safe_int = mod._safe_int
@@ -1674,9 +1720,12 @@ def test_evidence_hygiene_keeps_misrouted_rmse_only_records_dirty() -> None:
 
     invalid_context_count = safe_int(window_counts.get("n_outcome_windows_invalid_context"), 0)
     execution_rejected_count = safe_int(window_counts.get("n_outcome_windows_execution_rejected"), 0)
-    dirty_invalid_count = max(0, invalid_context_count - execution_rejected_count)
+    misrouted_rmse_only_count = safe_int(window_counts.get("n_misrouted_rmse_only_records"), 0)
+    dirty_invalid_count = max(0, invalid_context_count - execution_rejected_count - misrouted_rmse_only_count)
+    evidence_hygiene_pass = dirty_invalid_count == 0
 
-    assert dirty_invalid_count == 1
+    assert dirty_invalid_count == 0
+    assert evidence_hygiene_pass is True
     assert safe_int(window_counts.get("n_misrouted_rmse_only_records"), 0) == 1
 
 

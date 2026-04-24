@@ -5,8 +5,8 @@ evaluate_sleeve_promotions.py
 
 Promotion/demotion helper for sleeve buckets. Consumes the output of
 `scripts/summarize_sleeves.py` and emits a JSON plan describing which tickers
-should be promoted out of the speculative bucket or demoted from core when
-performance slips.
+should be promoted out of the speculative bucket, demoted from core when
+performance slips, or held when the rolling window is still inconclusive.
 """
 
 from __future__ import annotations
@@ -47,7 +47,7 @@ def _decide_move(
     entry: Dict[str, float],
     bucket: str,
     rules: PromotionRules,
-) -> Tuple[str | None, str | None]:
+) -> Tuple[str, str, str]:
     # Accept both legacy "total_trades" and the newer "trades" key emitted by
     # scripts/summarize_sleeves.py.
     trades = int(entry.get("total_trades") or entry.get("trades") or 0)
@@ -55,17 +55,27 @@ def _decide_move(
     profit_factor = float(entry.get("profit_factor") or 0.0)
 
     if trades < rules.min_trades:
-        return None, None
+        return "HOLD", bucket, f"hold: trades={trades} < min_trades={rules.min_trades}"
 
     if bucket == "speculative":
         if win_rate >= rules.promote_win_rate and profit_factor >= rules.promote_profit_factor:
-            return "core", f"Promote: win_rate={win_rate:.2f} pf={profit_factor:.2f} trades={trades}"
+            return "PROMOTE", "core", (
+                f"Promote: win_rate={win_rate:.2f} pf={profit_factor:.2f} trades={trades}"
+            )
+        return "HOLD", bucket, (
+            "hold: speculative evidence below promote floor "
+            f"(win_rate={win_rate:.2f}, pf={profit_factor:.2f}, trades={trades})"
+        )
     elif bucket == "core":
         if win_rate <= rules.demote_win_rate or profit_factor <= rules.demote_profit_factor:
-            return "speculative", (
+            return "DEMOTE", "speculative", (
                 f"Demote: win_rate={win_rate:.2f} pf={profit_factor:.2f} trades={trades}"
             )
-    return None, None
+        return "HOLD", bucket, (
+            "hold: core evidence above demote floor "
+            f"(win_rate={win_rate:.2f}, pf={profit_factor:.2f}, trades={trades})"
+        )
+    return "HOLD", bucket, f"hold: unassigned bucket={bucket}"
 
 
 def evaluate_promotions(
@@ -75,6 +85,7 @@ def evaluate_promotions(
 ) -> Dict[str, List[Dict]]:
     promotions: List[Dict] = []
     demotions: List[Dict] = []
+    holds: List[Dict] = []
     for row in summary:
         ticker = str(row.get("ticker") or "").strip()
         if not ticker:
@@ -87,13 +98,12 @@ def evaluate_promotions(
             or bucket_map.get(ticker)
             or "unassigned"
         )
-        target_bucket, reason = _decide_move(row, bucket, rules)
-        if target_bucket is None:
-            continue
+        action, target_bucket, reason = _decide_move(row, bucket, rules)
         move = {
             "ticker": ticker,
             "from": bucket,
             "to": target_bucket,
+            "action": action,
             "reason": reason,
             "metrics": {
                 "win_rate": float(row.get("win_rate") or 0.0),
@@ -101,11 +111,13 @@ def evaluate_promotions(
                 "total_trades": int(row.get("total_trades") or row.get("trades") or 0),
             },
         }
-        if target_bucket == "core":
+        if action == "PROMOTE":
             promotions.append(move)
-        else:
+        elif action == "DEMOTE":
             demotions.append(move)
-    return {"promotions": promotions, "demotions": demotions}
+        else:
+            holds.append(move)
+    return {"promotions": promotions, "demotions": demotions, "holds": holds}
 
 
 @click.command()
@@ -134,6 +146,11 @@ def main(
     summary = summary_payload.get("summary")
     if not summary:
         summary = summary_payload.get("sleeves") or []
+    summary_window = summary_payload.get("window") if isinstance(summary_payload, dict) else {}
+    if not isinstance(summary_window, dict) or not summary_window:
+        summary_window = summary_payload.get("meta", {}).get("window") if isinstance(summary_payload, dict) else {}
+    if not isinstance(summary_window, dict):
+        summary_window = {}
 
     bucket_map = _load_buckets(Path(config_path))
     rules = PromotionRules(
@@ -152,6 +169,7 @@ def main(
             "rules": rules.__dict__,
             "source_summary": summary_path,
             "config_path": config_path,
+            "window": summary_window,
         },
         "plan": plan,
     }

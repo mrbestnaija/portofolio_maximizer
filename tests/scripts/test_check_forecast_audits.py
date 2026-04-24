@@ -315,6 +315,97 @@ def test_check_forecast_audits_reports_parse_errors(
     assert "parse_errors=1" in output
 
 
+def test_check_forecast_audits_computes_target_amplitude_rollup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    audit_dir = tmp_path / "audits"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    db_path = tmp_path / "data" / "portfolio_maximizer.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    _write_closed_trades_db(
+        db_path,
+        [
+            {
+                "ts_signal_id": "ts_AAPL_1",
+                "is_close": 1,
+                "is_diagnostic": 0,
+                "is_synthetic": 0,
+            }
+        ],
+    )
+    _write_audit(
+        audit_dir / "forecast_audit_tp.json",
+        start="2026-03-01",
+        end="2026-03-02",
+        length=180,
+        horizon=1,
+        ticker="AAPL",
+        event_type="TRADE_FORECAST_AUDIT",
+        signal_context={
+            "ts_signal_id": "ts_AAPL_1",
+            "ticker": "AAPL",
+            "run_id": "tp_run",
+            "context_type": "TRADE",
+            "entry_ts": "2026-03-01T00:00:00Z",
+            "forecast_horizon": 1,
+            "entry_price": 100.0,
+            "target_price": 120.0,
+            "stop_loss": 95.0,
+            "expected_return_net": 0.25,
+            "exit_reason": "TAKE_PROFIT",
+            "holding_period_days": 2,
+        },
+        weights={"sarimax": 1.0},
+        eval_metrics={"sarimax": {"rmse": 2.0}, "ensemble": {"rmse": 2.0}},
+    )
+
+    cfg = tmp_path / "forecaster_monitoring.yml"
+    cfg.write_text(
+        "\n".join(
+            [
+                "forecaster_monitoring:",
+                "  regression_metrics:",
+                "    baseline_model: BEST_SINGLE",
+                "    holding_period_audits: 1",
+                "    disable_ensemble_if_no_lift: false",
+                "    max_rmse_ratio_vs_baseline: 1.1",
+                "    max_violation_rate: 0.25",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    import scripts.check_forecast_audits as mod
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "check_forecast_audits.py",
+            "--audit-dir",
+            str(audit_dir),
+            "--db",
+            str(db_path),
+            "--config-path",
+            str(cfg),
+            "--max-files",
+            "50",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        mod.main()
+    assert excinfo.value.code == 0
+
+    summary = json.loads((tmp_path / "logs" / "forecast_audits_cache" / "latest_summary.json").read_text())
+    assert summary["target_amplitude_support"] == 1
+    assert summary["target_amplitude_hit_count"] == 1
+    assert summary["target_amplitude_hit_rate"] == 1.0
+    assert summary["target_amplitude_hit_rate_rolling_20"] == 1.0
+
+
 def test_check_forecast_audits_include_research_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     production_dir = tmp_path / "logs" / "forecast_audits" / "production"
     research_dir = tmp_path / "logs" / "forecast_audits" / "research"
@@ -601,7 +692,8 @@ def test_check_forecast_audits_defaults_to_repo_db_for_default_production_dir(
     assert "Outcome join   : outcomes_loaded=1 join_attempted=1" in output
 
     summary = json.loads((tmp_path / "logs" / "forecast_audits_cache" / "latest_summary.json").read_text())
-    assert summary["outcome_join"]["db_path"].endswith("data\\portfolio_maximizer.db")
+    assert Path(summary["outcome_join"]["db_path"]).name == "portfolio_maximizer.db"
+    assert "data" in Path(summary["outcome_join"]["db_path"]).parts
     assert summary["telemetry_contract"]["outcomes_loaded"] is True
     assert summary["window_counts"]["n_outcome_windows_matched"] == 1
 
@@ -2372,9 +2464,9 @@ def test_check_forecast_audits_recent_window_gate_catches_fresh_regression(
                 "  regression_metrics:",
                 "    baseline_model: BEST_SINGLE",
                 "    max_rmse_ratio_vs_baseline: 1.1",
-                "    max_violation_rate: 0.40",
+                "    max_violation_rate: 0.20",
                 "    recent_window_audits: 3",
-                "    recent_window_max_violation_rate: 0.50",
+                "    recent_window_max_violation_rate: 0.20",
             ]
         ),
         encoding="utf-8",
@@ -3306,3 +3398,34 @@ def test_main_fails_closed_for_explicit_rmse_only_artifact_inside_production(
     assert summary["window_counts"]["n_outcome_windows_invalid_context"] == 1
     assert summary["window_counts"]["n_outcome_windows_missing_execution_metadata"] == 0
     assert summary["dataset_windows"][0]["outcome_reason"] == "MISROUTED_RMSE_ONLY_AUDIT"
+
+
+def test_outcome_max_files_larger_than_rmse_max_files() -> None:
+    """Outcome linkage scan window must exceed the RMSE analysis window.
+
+    Without this guarantee, a burst of RMSE-only re-forecast files can push
+    older trade-linked audit files past the max_files cutoff, making matched=0
+    even when linked files exist. Regression for the 2026-04-23 dedup collision
+    fix (audit_gate_defaults.FORECAST_AUDIT_OUTCOME_MAX_FILES_DEFAULT).
+    """
+    from scripts.audit_gate_defaults import (
+        FORECAST_AUDIT_MAX_FILES_DEFAULT,
+        FORECAST_AUDIT_OUTCOME_MAX_FILES_DEFAULT,
+    )
+
+    assert FORECAST_AUDIT_OUTCOME_MAX_FILES_DEFAULT > FORECAST_AUDIT_MAX_FILES_DEFAULT, (
+        "outcome max_files must exceed rmse max_files — re-forecast bursts must not "
+        "displace linked trade-audit files from the outcome scan window"
+    )
+
+
+def test_outcome_max_files_minimum_is_ten_thousand() -> None:
+    """10 000 is the minimum outcome scan window needed for the current production dir size.
+
+    The production audit dir had ~1 827 files on 2026-04-23.  A burst of 500 RMSE-only
+    files from a single auto_trader run caused matched to drop to 0.  10 000 gives
+    headroom for several years of daily runs without needing to revisit this threshold.
+    """
+    from scripts.audit_gate_defaults import FORECAST_AUDIT_OUTCOME_MAX_FILES_DEFAULT
+
+    assert FORECAST_AUDIT_OUTCOME_MAX_FILES_DEFAULT >= 10_000

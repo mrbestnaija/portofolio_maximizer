@@ -87,7 +87,7 @@ def test_constraints_can_filter_all_candidates():
     assert evaluations == []
 
 
-def test_constraints_bypass_when_no_trades():
+def test_constraints_fail_closed_when_no_trades():
     search_space = {"alpha": {"type": "continuous", "bounds": [0.0, 1.0]}}
     constraints = {"min": {"win_rate": 0.9}}
     optimizer = StrategyOptimizer(
@@ -101,7 +101,7 @@ def test_constraints_bypass_when_no_trades():
         return {
             "total_return": 0.0,
             "win_rate": 0.0,
-            "total_trades": 0,  # triggers constraint bypass
+            "total_trades": 0,  # must now fail closed
         }
 
     evaluations = optimizer.run(
@@ -110,7 +110,23 @@ def test_constraints_bypass_when_no_trades():
         regime=None,
     )
 
-    assert evaluations, "Zero-trade candidates should bypass constraints"
+    assert evaluations == []
+
+
+def test_constraints_and_scoring_fail_closed_on_nan_but_allow_positive_infinity():
+    optimizer = StrategyOptimizer(
+        search_space={},
+        objectives={"omega_ratio": 1.0},
+        constraints={"min": {"omega_ratio": 1.0}, "max": {"max_drawdown": 0.2}},
+    )
+
+    assert optimizer._apply_constraints(
+        {"omega_ratio": float("inf"), "max_drawdown": 0.1, "total_trades": 1}
+    ) is True
+    assert optimizer._apply_constraints(
+        {"omega_ratio": float("nan"), "max_drawdown": 0.1, "total_trades": 1}
+    ) is False
+    assert optimizer.score_metrics({"omega_ratio": float("nan")}) == float("-inf")
 
 
 def test_score_metrics_caps_infinite_barbell_metrics() -> None:
@@ -148,6 +164,18 @@ def test_profit_factor_constraint_can_reject_candidates():
     )
 
     assert evaluations == []
+
+
+def test_boolean_constraints_fail_closed_for_anti_barbell_gate():
+    optimizer = StrategyOptimizer(
+        search_space={"alpha": {"type": "continuous", "bounds": [0.0, 1.0]}},
+        objectives={"total_return": 1.0},
+        constraints={"min": {"anti_barbell_ok": True}},
+        random_state=9,
+    )
+
+    assert optimizer._apply_constraints({"anti_barbell_ok": True, "total_trades": 1}) is True
+    assert optimizer._apply_constraints({"anti_barbell_ok": False, "total_trades": 1}) is False
 
 
 def test_strategy_config_persistence_roundtrip(tmp_path):
@@ -208,3 +236,5 @@ def test_equity_curve_and_backtester_sanity(tmp_path):
     assert result.profit_factor >= 0
     assert result.strategy_returns is not None
     assert result.total_return >= 0
+    assert result.benchmark_proxy == "equal_weight_universe"
+    assert isinstance(result.benchmark_metrics_status, str)

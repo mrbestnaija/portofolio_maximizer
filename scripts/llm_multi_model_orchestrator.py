@@ -2401,6 +2401,9 @@ def _run_reasoning_model(
             logger.warning("Model %s failed: %s -- trying next fallback", try_model, e)
             continue
 
+    if any(k in str(task or "").lower() for k in ("health", "status")):
+        return _health_evidence_summary()
+
     return f"[ERROR] All models failed for reasoning task"
 
 
@@ -4959,6 +4962,16 @@ def _summarize_health_tool_result(raw_result: str) -> str:
     return _truncate_progress_text("\n".join(lines), 900)
 
 
+def _health_evidence_summary() -> str:
+    try:
+        return _summarize_health_tool_result(_get_system_health_json())
+    except Exception as exc:
+        return _truncate_progress_text(
+            f"health: DEGRADED\nhealth evidence unavailable: {exc}",
+            900,
+        )
+
+
 def _is_trading_critical_prompt(prompt: str) -> bool:
     text = (prompt or "").lower()
     return any(kw in text for kw in TRADING_CRITICAL_KEYWORDS)
@@ -5487,11 +5500,23 @@ def orchestrate(
     if not orch_model:
         # No tool-capable model available; fall back to direct reasoning
         logger.warning("No orchestrator model available; falling back to direct reasoning")
+        if any(k in str(prompt or "").lower() for k in ("health", "status")):
+            content = _health_evidence_summary()
+            return _finalize_orchestration_response(
+                content=content,
+                progress=progress,
+                reply_channel=reply_channel,
+                reply_to=reply_to,
+                total_tool_calls=total_tool_calls,
+                started_at=t0_total,
+                primed_context=primed_context,
+                successful_tool_results=successful_tool_results,
+            )
         reasoning_model = get_best_model_for_role("reasoning")
         if reasoning_model:
             content = _run_reasoning_model(model=reasoning_model, task=prompt)
         else:
-            content = "[ERROR] No LLM models available. Check Ollama: ollama list"
+            content = _health_evidence_summary() if any(k in str(prompt or "").lower() for k in ("health", "status")) else "[ERROR] No LLM models available. Check Ollama: ollama list"
         return _finalize_orchestration_response(
             content=content,
             progress=progress,

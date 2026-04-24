@@ -39,6 +39,83 @@ run_with_logging() {
   } >> "${LOG_FILE}" 2>&1
 }
 
+emit_canonical_snapshot() {
+  if [[ ! -f "config/canonical_source_registry.yml" ]]; then
+    echo "[CRON] canonical_source_registry.yml missing; refusing to emit canonical snapshot." >&2
+    return 1
+  fi
+  run_with_logging "emit_canonical_snapshot: emit_canonical_snapshot.py" \
+    "${PYTHON_BIN}" scripts/emit_canonical_snapshot.py
+}
+
+generate_tp_contingency() {
+  run_with_logging "tp_contingency: outcome_linkage_attribution_report.py" \
+    "${PYTHON_BIN}" scripts/outcome_linkage_attribution_report.py \
+      --output logs/automation/tp_contingency_latest.json
+}
+
+emit_runtime_status() {
+  local runtime_status_path="${PROJECT_ROOT}/logs/runtime_status_latest.json"
+  local runtime_output=""
+  local rc=0
+
+  if runtime_output="$("${PYTHON_BIN}" scripts/project_runtime_status.py --pretty)"; then
+    rc=0
+  else
+    rc=$?
+  fi
+
+  if [[ -z "${runtime_output}" ]]; then
+    echo "[CRON] project_runtime_status.py produced no output." >&2
+    return 1
+  fi
+
+  printf '%s\n' "${runtime_output}" > "${runtime_status_path}"
+  {
+    echo "[CRON] $(date -Iseconds) :: runtime_status: project_runtime_status.py"
+    printf '%s\n' "${runtime_output}"
+  } >> "${LOG_FILE}" 2>&1
+
+  return "${rc}"
+}
+
+emit_dashboard_bridge() {
+  run_with_logging "dashboard_db_bridge: dashboard_db_bridge.py" \
+    "${PYTHON_BIN}" scripts/dashboard_db_bridge.py
+}
+
+emit_production_gate() {
+  run_with_logging "production_audit_gate: production_audit_gate.py" \
+    "${PYTHON_BIN}" scripts/production_audit_gate.py --unattended-profile
+}
+
+family_calibration() {
+  run_with_logging "family_calibration: family_calibration_writer.py" \
+    "${PYTHON_BIN}" scripts/family_calibration_writer.py "$@"
+}
+
+reconcile_platt_outcomes() {
+  # Write 'outcome' back into quant_validation.jsonl for every closed trade
+  # that has a matching JSONL entry.  Must run after every auto_trader cycle
+  # so Platt calibration pairs accumulate in real-time, not just overnight.
+  run_with_logging "reconcile_platt_outcomes: update_platt_outcomes.py" \
+    "${PYTHON_BIN}" scripts/update_platt_outcomes.py || true
+}
+
+sanitize_forecast_audits() {
+  local forecast_audit_dir="${CRON_FORECAST_AUDIT_DIR:-logs/forecast_audits/production}"
+  local forecast_eval_audit_dir="${CRON_FORECAST_EVAL_AUDIT_DIR:-logs/forecast_audits/production_eval}"
+  local forecast_quarantine_dir="${CRON_FORECAST_QUARANTINE_DIR:-${forecast_audit_dir}/quarantine}"
+  run_with_logging "sanitize_forecast_audits: sanitize_production_forecast_audits.py" \
+    "${PYTHON_BIN}" scripts/sanitize_production_forecast_audits.py \
+      --audit-dir "${forecast_audit_dir}" \
+      --eval-audit-dir "${forecast_eval_audit_dir}" \
+      --quarantine-dir "${forecast_quarantine_dir}" \
+      --manifest-path "${forecast_audit_dir}/forecast_audit_manifest.jsonl" \
+      --eval-manifest-path "${forecast_eval_audit_dir}/forecast_audit_manifest.jsonl" \
+      --apply
+}
+
 case "${TASK}" in
   daily_etl)
     # Once-per-day ETL refresh using the main pipeline.
@@ -60,8 +137,33 @@ case "${TASK}" in
     # High-frequency trading loop (paper trading engine).
     # Intended to be run every N minutes; behaviour is driven by
     # scripts/run_auto_trader.py and config/pipeline_config.yml.
+    cycle_rc=0
     run_with_logging "auto_trader: run_auto_trader.py" \
       "${PYTHON_BIN}" scripts/run_auto_trader.py "$@"
+    reconcile_platt_outcomes
+    if ! emit_canonical_snapshot; then
+      echo "[CRON] emit_canonical_snapshot failed after auto_trader." >&2
+      cycle_rc=1
+    fi
+    if ! generate_tp_contingency; then
+      echo "[CRON] tp_contingency report failed after auto_trader." >&2
+    fi
+    if ! emit_dashboard_bridge; then
+      echo "[CRON] dashboard_db_bridge failed after auto_trader." >&2
+    fi
+    if ! emit_production_gate; then
+      echo "[CRON] production_audit_gate failed after auto_trader." >&2
+      cycle_rc=1
+    fi
+    if ! emit_runtime_status; then
+      echo "[CRON] project_runtime_status failed after auto_trader." >&2
+      cycle_rc=1
+    fi
+    exit "${cycle_rc}"
+    ;;
+
+  family_calibration)
+    family_calibration "$@"
     ;;
 
   auto_trader_core)
@@ -71,6 +173,12 @@ case "${TASK}" in
     CORE_DB_PATH="${CRON_CORE_DB_PATH:-data/portfolio_maximizer.db}"
     CORE_TOTAL_TARGET="${CRON_CORE_TOTAL_TARGET:-30}"
     CORE_PER_TARGET="${CRON_CORE_PER_TICKER_TARGET:-10}"
+
+    # Clean legacy RMSE-only production artifacts before the core cycle or
+    # target check so summary/counting never sees contaminated production rows.
+    if ! sanitize_forecast_audits; then
+      echo "[CRON] sanitize_forecast_audits failed; continuing with auto_trader_core." >&2
+    fi
 
     "${PYTHON_BIN}" - <<PY
 import sqlite3, sys, pathlib
@@ -110,6 +218,31 @@ PY
     fi
     run_with_logging "auto_trader_core: run_auto_trader.py (tickers=${CORE_TICKERS})" \
       "${PYTHON_BIN}" scripts/run_auto_trader.py --tickers "${CORE_TICKERS}" "$@"
+    reconcile_platt_outcomes
+    cycle_rc=0
+    if ! emit_canonical_snapshot; then
+      echo "[CRON] emit_canonical_snapshot failed after auto_trader_core." >&2
+      cycle_rc=1
+    fi
+    if ! generate_tp_contingency; then
+      echo "[CRON] tp_contingency report failed after auto_trader_core." >&2
+    fi
+    if ! emit_dashboard_bridge; then
+      echo "[CRON] dashboard_db_bridge failed after auto_trader_core." >&2
+    fi
+    if ! emit_production_gate; then
+      echo "[CRON] production_audit_gate failed after auto_trader_core." >&2
+      cycle_rc=1
+    fi
+    if ! emit_runtime_status; then
+      echo "[CRON] project_runtime_status failed after auto_trader_core." >&2
+      cycle_rc=1
+    fi
+    exit "${cycle_rc}"
+    ;;
+
+  sanitize_forecast_audits)
+    sanitize_forecast_audits
     ;;
 
   synthetic_refresh)

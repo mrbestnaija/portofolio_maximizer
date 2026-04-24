@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -110,6 +111,7 @@ def _run(cmd: list[str], label: str) -> dict[str, Any]:
             capture_output=True,
             text=True,
             cwd=str(ROOT),
+            env=os.environ.copy(),
             check=False,
         )
         return {

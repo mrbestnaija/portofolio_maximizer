@@ -14,6 +14,7 @@ sizing is promising before wiring it into production paths.
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import os
 import site
@@ -24,6 +25,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import click
+import numpy as np
 import pandas as pd
 
 ROOT_PATH = Path(__file__).resolve().parent.parent
@@ -32,12 +34,16 @@ if str(ROOT_PATH) not in sys.path:
     sys.path.insert(0, str(ROOT_PATH))
 
 from etl.database_manager import DatabaseManager
-from etl.portfolio_math import portfolio_metrics_ngn
+from etl.portfolio_math import omega_bootstrap_ci, portfolio_metrics_ngn
 from etl.time_series_forecaster import TimeSeriesForecaster, TimeSeriesForecasterConfig
 from execution.paper_trading_engine import PaperTradingEngine
 from models.signal_generator_factory import build_signal_generator
 from risk.barbell_policy import BarbellConfig
-from risk.barbell_promotion_gate import decide_promotion_from_report, write_promotion_evidence as _write_promotion_evidence
+from risk.barbell_promotion_gate import (
+    decide_promotion_from_report,
+    summarize_regime_realism,
+    write_promotion_evidence as _write_promotion_evidence,
+)
 from risk.barbell_sizing import (
     apply_barbell_confidence,
     barbell_confidence_multipliers,
@@ -102,6 +108,17 @@ def _to_engine_frame(df: pd.DataFrame) -> pd.DataFrame:
     return mapped
 
 
+def _stable_eval_seed(*, branch: str, payload: Dict[str, Any]) -> int:
+    raw = json.dumps(
+        {"branch": branch, "payload": payload},
+        sort_keys=True,
+        default=str,
+        separators=(",", ":"),
+    )
+    digest = hashlib.sha256(raw.encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], "big", signed=False) % (2**32)
+
+
 def _barbell_multipliers(cfg: BarbellConfig) -> Dict[str, float]:
     # Backward-compatible wrapper. Source of truth lives in risk.barbell_sizing.
     return barbell_confidence_multipliers(cfg)
@@ -150,6 +167,8 @@ def _augment_distribution_metrics(
     initial_capital: float,
     path_risk_records: Optional[Sequence[Dict[str, Any]]] = None,
     execution_drag_fractions: Optional[Sequence[float]] = None,
+    regime_labels: Optional[Sequence[Optional[str]]] = None,
+    bootstrap_seed: Optional[int] = None,
 ) -> Dict[str, Any]:
     equity = float(initial_capital)
     trade_returns: List[float] = []
@@ -161,13 +180,19 @@ def _augment_distribution_metrics(
     if trade_returns:
         drag_hurdle = _mean_or_none(list(execution_drag_fractions or []))
         dist = portfolio_metrics_ngn(pd.Series(trade_returns), execution_drag_hurdle=drag_hurdle)
+        seed_rng = np.random.default_rng(int(bootstrap_seed)) if bootstrap_seed is not None else None
+        omega_ci = omega_bootstrap_ci(pd.Series(trade_returns), rng=seed_rng)
         for key in (
             "omega_ratio",
             "omega_curve",
             "omega_robustness_score",
             "omega_monotonicity_ok",
+            "omega_cliff_drop_ratio",
+            "omega_cliff_ok",
             "omega_above_hurdle_margin",
             "omega_robustness_complete",
+            "expected_shortfall_to_edge",
+            "es_to_edge_bounded",
             "payoff_asymmetry",
             "n_wins",
             "n_losses",
@@ -181,13 +206,25 @@ def _augment_distribution_metrics(
         ):
             if key in dist:
                 summary[key] = dist.get(key)
+        summary["omega_ci_lower"] = omega_ci.get("omega_ci_lower")
+        summary["omega_ci_upper"] = omega_ci.get("omega_ci_upper")
+        summary["omega_ci_width"] = omega_ci.get("omega_ci_width")
+        summary["omega_right_tail_ok"] = omega_ci.get("omega_right_tail_ok")
     else:
         summary.setdefault("omega_ratio", None)
         summary.setdefault("omega_curve", None)
         summary.setdefault("omega_robustness_score", None)
         summary.setdefault("omega_monotonicity_ok", None)
+        summary.setdefault("omega_cliff_drop_ratio", None)
+        summary.setdefault("omega_cliff_ok", None)
         summary.setdefault("omega_above_hurdle_margin", None)
         summary.setdefault("omega_robustness_complete", False)
+        summary.setdefault("omega_ci_lower", None)
+        summary.setdefault("omega_ci_upper", None)
+        summary.setdefault("omega_ci_width", None)
+        summary.setdefault("omega_right_tail_ok", None)
+        summary.setdefault("expected_shortfall_to_edge", None)
+        summary.setdefault("es_to_edge_bounded", None)
         summary.setdefault("payoff_asymmetry_effective", 0.0)
 
     records = list(path_risk_records or [])
@@ -207,7 +244,26 @@ def _augment_distribution_metrics(
         summary.setdefault("path_risk_ok_rate", None)
         summary.setdefault("barbell_path_risk_ok", None)
 
+    regime_summary = summarize_regime_realism(list(regime_labels or []))
+    summary.update(regime_summary)
+
     return summary
+
+
+def _lookup_trade_regime(source_db: DatabaseManager, ts_signal_id: Optional[str]) -> Optional[str]:
+    if not ts_signal_id:
+        return None
+    try:
+        source_db.cursor.execute(
+            "SELECT detected_regime FROM time_series_forecasts WHERE ts_signal_id = ? LIMIT 1",
+            (str(ts_signal_id),),
+        )
+        row = source_db.cursor.fetchone()
+    except Exception:
+        return None
+    if not row:
+        return None
+    return str(row[0] or "").strip().upper() or None
 
 
 def _simulate_from_trade_history(
@@ -218,6 +274,7 @@ def _simulate_from_trade_history(
     initial_capital: float,
     enable_barbell_sizing: bool,
     barbell_cfg: BarbellConfig,
+    bootstrap_seed: Optional[int] = None,
     run_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     multipliers = _barbell_multipliers(barbell_cfg)
@@ -227,7 +284,7 @@ def _simulate_from_trade_history(
     ticker_set = {str(t).upper() for t in tickers}
 
     query = """
-        SELECT trade_date, ticker, realized_pnl
+        SELECT trade_date, ticker, realized_pnl, ts_signal_id
         FROM trade_executions
         WHERE realized_pnl IS NOT NULL
           AND trade_date >= ?
@@ -243,15 +300,39 @@ def _simulate_from_trade_history(
         params.extend(sorted(ticker_set))
     query += " ORDER BY trade_date ASC, id ASC"
 
-    source_db.cursor.execute(query, params)
-    rows = source_db.cursor.fetchall() or []
+    try:
+        source_db.cursor.execute(query, params)
+        rows = source_db.cursor.fetchall() or []
+        has_ts_signal_id = True
+    except Exception:
+        fallback_query = """
+            SELECT trade_date, ticker, realized_pnl
+            FROM trade_executions
+            WHERE realized_pnl IS NOT NULL
+              AND trade_date >= ?
+              AND trade_date <= ?
+        """
+        fallback_params: List[Any] = [window.start_date, window.end_date]
+        if run_id:
+            fallback_query += " AND run_id = ?"
+            fallback_params.append(run_id)
+        if ticker_set:
+            placeholders = ",".join("?" for _ in ticker_set)
+            fallback_query += f" AND UPPER(ticker) IN ({placeholders})"
+            fallback_params.extend(sorted(ticker_set))
+        fallback_query += " ORDER BY trade_date ASC, id ASC"
+        source_db.cursor.execute(fallback_query, fallback_params)
+        rows = source_db.cursor.fetchall() or []
+        has_ts_signal_id = False
 
     pnl_events: List[Tuple[str, str, float]] = []
+    regime_labels: List[Optional[str]] = []
     for row in rows:
         try:
             trade_date = str(row[0])
             ticker = str(row[1]).upper()
             pnl = float(row[2] or 0.0)
+            ts_signal_id = str(row[3]) if has_ts_signal_id and len(row) > 3 else None
         except Exception:
             continue
 
@@ -263,6 +344,7 @@ def _simulate_from_trade_history(
             elif ticker in spec_set:
                 pnl *= float(multipliers.get("spec", 1.0))
         pnl_events.append((trade_date, ticker, pnl))
+        regime_labels.append(_lookup_trade_regime(source_db, ts_signal_id))
 
     total_trades = len(pnl_events)
     gross_profit = sum(max(0.0, pnl) for _, __, pnl in pnl_events)
@@ -299,6 +381,8 @@ def _simulate_from_trade_history(
         initial_capital=float(initial_capital),
         path_risk_records=None,
         execution_drag_fractions=None,
+        regime_labels=regime_labels,
+        bootstrap_seed=bootstrap_seed,
     )
 
 
@@ -320,6 +404,7 @@ def _simulate_walk_forward(
     signal_max_risk_score: float = 0.7,
     disable_quant_validation: bool = False,
     disable_volatility_filter: bool = False,
+    bootstrap_seed: Optional[int] = None,
 ) -> Dict[str, Any]:
     ohlcv = source_db.load_ohlcv(list(tickers), start_date=window.start_date, end_date=window.end_date)
     if ohlcv.empty:
@@ -353,6 +438,7 @@ def _simulate_walk_forward(
     path_risk_records: List[Dict[str, Any]] = []
     execution_drag_fractions: List[float] = []
     realized_pnl_events: List[Tuple[str, str, float]] = []
+    executed_regime_labels: List[Optional[str]] = []
 
     frames_by_ticker: Dict[str, pd.DataFrame] = {
         str(sym).upper(): df.sort_index() for sym, df in ohlcv.groupby("ticker")
@@ -462,16 +548,19 @@ def _simulate_walk_forward(
             if result and result.status == "EXECUTED":
                 trade = result.trade
                 trade_date = str(date.date().isoformat()) if hasattr(date, "date") else str(date)
-                if trade is not None and trade.realized_pnl not in (None, 0):
-                    realized_pnl_events.append((trade_date, signal_dict["ticker"], float(trade.realized_pnl)))
+                regime_label = str(context.regime or "").strip().upper() or None
+                executed_regime_labels.append(regime_label)
                 path_record = {
                     "barbell_path_risk_ok": bool(path_risk.get("barbell_path_risk_ok", True)),
                     "roundtrip_cost_to_edge": signal_dict["barbell_diagnostics"].get("roundtrip_cost_to_edge"),
                     "gap_risk_to_edge": signal_dict["barbell_diagnostics"].get("gap_risk_to_edge"),
                     "funding_to_edge": signal_dict["barbell_diagnostics"].get("funding_to_edge"),
                     "liquidity_to_depth": signal_dict["barbell_diagnostics"].get("liquidity_to_depth"),
+                    "detected_regime": regime_label,
                 }
                 path_risk_records.append(path_record)
+                if trade is not None and trade.realized_pnl is not None:
+                    realized_pnl_events.append((trade_date, signal_dict["ticker"], float(trade.realized_pnl)))
                 try:
                     execution_drag_fractions.append(float(signal_dict.get("roundtrip_cost_bps", 0.0)) / 1e4)
                 except (TypeError, ValueError):
@@ -512,6 +601,8 @@ def _simulate_walk_forward(
         initial_capital=float(initial_capital),
         path_risk_records=path_risk_records,
         execution_drag_fractions=execution_drag_fractions,
+        regime_labels=executed_regime_labels,
+        bootstrap_seed=bootstrap_seed,
     )
 
 
@@ -541,6 +632,27 @@ def run_barbell_eval(
     if src not in {"walk_forward", "trade_history"}:
         raise ValueError("evidence_source must be one of {'walk_forward','trade_history'}")
 
+    seed_payload = {
+        "db_path": str(db.db_path),
+        "tickers": list(tickers),
+        "window": {"start_date": window.start_date, "end_date": window.end_date},
+        "initial_capital": float(initial_capital),
+        "forecast_horizon": int(forecast_horizon),
+        "history_bars": int(history_bars),
+        "min_bars": int(min_bars),
+        "step_days": int(step_days),
+        "forecaster_profile": str(forecaster_profile or "full"),
+        "signal_confidence_threshold": float(signal_confidence_threshold),
+        "signal_min_expected_return": float(signal_min_expected_return),
+        "signal_max_risk_score": float(signal_max_risk_score),
+        "disable_quant_validation": bool(disable_quant_validation),
+        "disable_volatility_filter": bool(disable_volatility_filter),
+        "evidence_source": src,
+        "run_id": str(run_id) if run_id is not None else None,
+    }
+    baseline_seed = _stable_eval_seed(branch=f"{src}:ts_only", payload=seed_payload)
+    barbell_seed = _stable_eval_seed(branch=f"{src}:barbell_sized", payload=seed_payload)
+
     if src == "trade_history":
         baseline = _simulate_from_trade_history(
             source_db=db,
@@ -549,6 +661,7 @@ def run_barbell_eval(
             initial_capital=initial_capital,
             enable_barbell_sizing=False,
             barbell_cfg=barbell_cfg,
+            bootstrap_seed=baseline_seed,
             run_id=run_id,
         )
         barbell = _simulate_from_trade_history(
@@ -558,6 +671,7 @@ def run_barbell_eval(
             initial_capital=initial_capital,
             enable_barbell_sizing=True,
             barbell_cfg=barbell_cfg,
+            bootstrap_seed=barbell_seed,
             run_id=run_id,
         )
     else:
@@ -578,6 +692,7 @@ def run_barbell_eval(
             signal_max_risk_score=signal_max_risk_score,
             disable_quant_validation=disable_quant_validation,
             disable_volatility_filter=disable_volatility_filter,
+            bootstrap_seed=baseline_seed,
         )
         barbell = _simulate_walk_forward(
             source_db=db,
@@ -596,6 +711,7 @@ def run_barbell_eval(
             signal_max_risk_score=signal_max_risk_score,
             disable_quant_validation=disable_quant_validation,
             disable_volatility_filter=disable_volatility_filter,
+            bootstrap_seed=barbell_seed,
         )
 
     def _delta(a: Dict[str, float], b: Dict[str, float]) -> Dict[str, float]:

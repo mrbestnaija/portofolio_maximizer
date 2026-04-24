@@ -540,6 +540,26 @@ def _save_runtime_state(path: Path, state: dict[str, Any]) -> None:
     _safe_write_json(path, payload)
 
 
+def _remember_channels_snapshot(
+    state: dict[str, Any],
+    channels_payload: dict[str, Any],
+    *,
+    source: str = "probe",
+) -> None:
+    channels = channels_payload.get("channels") if isinstance(channels_payload.get("channels"), dict) else None
+    if not isinstance(channels, dict):
+        return
+    snapshot = {
+        "timestamp_utc": _utc_now_iso(),
+        "timestamp_ms": channels_payload.get("ts"),
+        "channels": channels,
+        "source": str(source or "probe"),
+    }
+    state["last_channels_status_snapshot"] = snapshot
+    state["last_channels_status_snapshot_at_utc"] = snapshot["timestamp_utc"]
+    state["last_channels_status_snapshot_source"] = snapshot["source"]
+
+
 def _acquire_run_lock(
     *,
     lock_path: Path,
@@ -2054,6 +2074,7 @@ def main(argv: list[str]) -> int:
             timeout_seconds=20.0,
         )
         if isinstance(channels_payload, dict):
+            _remember_channels_snapshot(state, channels_payload, source="probe")
             report["steps"]["channels_status_snapshot"] = {
                 "timestamp_ms": channels_payload.get("ts"),
                 "channels": channels_payload.get("channels"),

@@ -898,7 +898,7 @@ additional ETL passes to move the gate threshold into positive territory.
    - Early-credit bypass in BOTH NOT_DUE code paths of `scripts/check_forecast_audits.py`
      (line 655 and line 2163): if `match_count==1` in `production_closed_trades`, skip the
      `expected_close_ts` wait. Eliminates procrastination for already-closed trades.
-   - Gate now: `matched=1/1 (100%)`, warmup active until 2026-04-15.
+   - Gate now: `matched=1/1 (100%)`, historical warmup window was active until 2026-04-15.
 3. `GATES_FAIL` → structural fix via SARIMAX model diversity. Recent window at 40%
    violation rate (threshold 35%); needs ~20 more Phase 10 forecast audits.
 
@@ -927,7 +927,7 @@ additional ETL passes to move the gate threshold into positive territory.
 ## Phase 10c Reference (Gate PASS + OOS Selector Wiring - COMPLETE 2026-03-30)
 
 **Status**: COMPLETE (2149 passed, 0 failed)
-**Gate**: `PASS (semantics=PASS)` — 33.33% violation rate, decision=KEEP, warmup expires 2026-04-15
+**Gate**: `PASS (semantics=PASS)` — 33.33% violation rate, decision=KEEP, historical warmup window expires 2026-04-15
 **Documentation**: `Documentation/REPO_WIDE_GATE_LIFT_REMEDIATION_2026-03-29.md`, `Documentation/GATE_LIFT_FIRST_PRINCIPLES_AUDIT_20260329.md`
 
 ### Root Cause (from first-principles audit)
@@ -1127,7 +1127,7 @@ dead code on every production run. DA was never passed to `select_weights()` →
 ## Phase 10b Reference (Gate PASS + CI/DA/Platt Improvements - COMPLETE 2026-03-26)
 
 **Status**: COMPLETE (2078 passed, 0 failed; commit 11aecc9)
-**Gate**: `PASS (semantics=INCONCLUSIVE_ALLOWED)` — warmup expires 2026-04-15
+**Gate**: `PASS (semantics=INCONCLUSIVE_ALLOWED)` — historical warmup window expires 2026-04-15
 
 ### Phase 10b Changes
 
@@ -1193,7 +1193,7 @@ dead code on every production run. DA was never passed to `select_weights()` →
 1. **RMSE violation rate** — needs more `run_etl_pipeline.py` CV runs to populate
    `evaluation_metrics` in audit files (auto-trader runs have empty `{}` because
    `evaluate()` requires actual prices). Target: 20+ effective audits at <35% violation rate
-   before warmup expires 2026-04-15.
+   before the historical warmup window expired on 2026-04-15.
 2. **Proof window days** — 11 more trading days; happens naturally with live cycles.
 3. **THIN_LINKAGE** — matched=1/196; each closed trade matching an audit window
    `expected_close_ts` adds a match; data-driven.
@@ -1544,8 +1544,9 @@ ELSE:
     proceed to Phase 11 Phase B
 ```
 
-THIN_LINKAGE warmup expires 2026-04-15. After expiry, `matched >= 10` is required
-or the gate hard-fails. Current: `matched = 1/309 (0.32%)`.
+Historical note: the THIN_LINKAGE warmup window expired on 2026-04-15. After that,
+`matched >= 10` is required or the gate hard-fails. Current snapshot at the time of
+this note: `matched = 1/309 (0.32%)`.
 
 ### What Is and Is Not Implemented
 

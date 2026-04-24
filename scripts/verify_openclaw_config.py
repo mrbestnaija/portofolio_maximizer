@@ -20,7 +20,11 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from scripts.openclaw_cron_contract import load_cron_jobs_payload, summarize_cron_jobs
+from utils.openclaw_model_policy import Qwen35Policy, is_qwen35_variant, load_qwen35_policy
+
 OPENCLAW_JSON = Path.home() / ".openclaw" / "openclaw.json"
+OPENCLAW_CRON_JOBS = Path.home() / ".openclaw" / "cron" / "jobs.json"
 RECOMMENDED_BOOTSTRAP_MAX_CHARS = 20000
 WORKSPACE_BOOTSTRAP_FILES = ("SOUL.md", "AGENTS.md", "TOOLS.md", "IDENTITY.md", "USER.md")
 FALSEY_VALUES = {"0", "false", "no", "off"}
@@ -81,6 +85,22 @@ def _load_cfg() -> dict:
     return json.loads(OPENCLAW_JSON.read_text(encoding="utf-8-sig"))
 
 
+def _print_unreadable_config_report(exc: Exception) -> None:
+    print("=" * 65)
+    print("  OpenClaw Configuration Validation Report")
+    print("  Config: " + str(OPENCLAW_JSON))
+    print("=" * 65)
+    print()
+    print("ISSUES (1):")
+    print(f"  [CRITICAL] OpenClaw config unreadable: {OPENCLAW_JSON} ({exc})")
+    print()
+    print("RESULT: FAIL (1 issues, 0 warnings)")
+
+
+def _load_cron_jobs_payload() -> tuple[dict, str | None]:
+    return load_cron_jobs_payload(OPENCLAW_CRON_JOBS)
+
+
 def _describe_agent_tools_policy(agent_tools: dict) -> str:
     profile = str(agent_tools.get("profile") or "").strip()
     if profile:
@@ -113,14 +133,45 @@ def _load_llm_config() -> dict:
         return {}
 
 
+def _qwen35_primary_violation(*, model_name: str, policy: Qwen35Policy, label: str) -> str | None:
+    text = str(model_name or "").strip()
+    if not text or not is_qwen35_variant(text):
+        return None
+    if policy.primary_allowed and policy.preferred_primary and text == policy.preferred_primary:
+        return None
+    approved = policy.preferred_primary or "approved qwen3.5 primary"
+    return (
+        f"[CRITICAL] {label} uses qwen3.5 model {text!r} without benchmark-approved primary policy "
+        f"(expected {approved!r}; policy={policy.policy_path}; status={policy.benchmark_status})"
+    )
+
+
+def _qwen35_fallback_violation(*, model_name: str, policy: Qwen35Policy, label: str) -> str | None:
+    text = str(model_name or "").strip()
+    if not text or not is_qwen35_variant(text):
+        return None
+    if policy.fallback_allowed or policy.primary_allowed:
+        return None
+    return (
+        f"[CRITICAL] {label} includes qwen3.5 model {text!r} without benchmark-approved fallback policy "
+        f"(policy={policy.policy_path}; status={policy.benchmark_status})"
+    )
+
+
 def main() -> int:
     issues: list[str] = []
     warnings: list[str] = []
     ok: list[str] = []
 
-    cfg = _load_cfg()
+    try:
+        cfg = _load_cfg()
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError) as exc:
+        _print_unreadable_config_report(exc)
+        return 1
+
     env = _load_env()
     llm_cfg = _load_llm_config()
+    qwen35_policy = load_qwen35_policy(base_dir=PROJECT_ROOT)
 
     # ===== 1. MODEL PROVIDERS =====
     providers = cfg.get("models", {}).get("providers", {})
@@ -181,11 +232,35 @@ def main() -> int:
     else:
         ok.append(f"Primary model = {primary}")
 
+    primary_name = primary.split("/", 1)[1] if primary.startswith("ollama/") and "/" in primary else ""
+    if primary_name:
+        qwen35_primary_issue = _qwen35_primary_violation(
+            model_name=primary_name,
+            policy=qwen35_policy,
+            label="agents.defaults.model.primary",
+        )
+        if qwen35_primary_issue:
+            issues.append(qwen35_primary_issue)
+        elif is_qwen35_variant(primary_name):
+            ok.append(f"Primary model uses approved qwen3.5 primary = {primary_name}")
+
     remote_fb = [fb for fb in fallbacks if not fb.startswith("ollama/")]
     if remote_fb:
         issues.append(f"[CRITICAL] Remote fallbacks: {remote_fb}")
     else:
         ok.append(f"Fallbacks = {fallbacks or '[] (none, local-only)'}")
+
+    qwen35_fallbacks = [fb for fb in fallbacks if fb.startswith("ollama/") and is_qwen35_variant(fb.split("/", 1)[1])]
+    if qwen35_fallbacks:
+        qwen35_fallback_issue = _qwen35_fallback_violation(
+            model_name=qwen35_fallbacks[0].split("/", 1)[1],
+            policy=qwen35_policy,
+            label="agents.defaults.model.fallbacks",
+        )
+        if qwen35_fallback_issue:
+            issues.append(qwen35_fallback_issue)
+        else:
+            ok.append(f"qwen3.5 fallbacks approved = {qwen35_fallbacks}")
 
     # Model allowlist
     allowlist = defaults.get("models", {})
@@ -194,6 +269,18 @@ def main() -> int:
         warnings.append(f"Remote models in allowlist: {remote_allowed}")
     else:
         ok.append(f"Allowlist ({len(allowlist)} entries): all local")
+
+    qwen35_allowlist = [m for m in allowlist if str(m).startswith("ollama/") and is_qwen35_variant(str(m).split("/", 1)[1])]
+    if qwen35_allowlist:
+        qwen35_allowlist_issue = _qwen35_fallback_violation(
+            model_name=qwen35_allowlist[0].split("/", 1)[1],
+            policy=qwen35_policy,
+            label="agents.defaults.models",
+        )
+        if qwen35_allowlist_issue:
+            issues.append(qwen35_allowlist_issue)
+        else:
+            ok.append(f"qwen3.5 allowlist entries approved = {qwen35_allowlist}")
 
     # Image model
     img = defaults.get("imageModel", {})
@@ -305,11 +392,39 @@ def main() -> int:
     else:
         warnings.append(f".env OPENCLAW_LOCAL_ONLY = {env_local_only} (remote models allowed!)")
 
+    env_edge_safe_runtime = env.get("PMX_EDGE_SAFE_RUNTIME", "")
+    edge_safe_enabled = bool(env_edge_safe_runtime) and _env_enabled(env_edge_safe_runtime, default=False)
+    if edge_safe_enabled:
+        ok.append(f".env PMX_EDGE_SAFE_RUNTIME = {env_edge_safe_runtime}")
+        if not _env_enabled(env_local_only, default=False):
+            issues.append("[ERROR] PMX_EDGE_SAFE_RUNTIME requires OPENCLAW_LOCAL_ONLY=1")
+        for runtime_flag in ("ENABLE_PARALLEL_FORECASTS", "ENABLE_PARALLEL_TICKER_PROCESSING", "ENABLE_GPU_PARALLEL"):
+            if _env_enabled(env.get(runtime_flag), default=False):
+                issues.append(f"[ERROR] {runtime_flag} must be disabled when PMX_EDGE_SAFE_RUNTIME=1")
+    elif env_edge_safe_runtime:
+        warnings.append(f".env PMX_EDGE_SAFE_RUNTIME = {env_edge_safe_runtime} (disabled)")
+
     env_model_order = env.get("OPENCLAW_OLLAMA_MODEL_ORDER", "")
     if env_model_order:
         models_ordered = [m.strip() for m in env_model_order.split(",") if m.strip()]
-        if models_ordered and "qwen3" not in models_ordered[0]:
-            issues.append(f"[ERROR] OPENCLAW_OLLAMA_MODEL_ORDER first model is {models_ordered[0]}, not qwen3:8b (tool-calling required)")
+        if models_ordered:
+            first_model = models_ordered[0]
+            if is_qwen35_variant(first_model):
+                qwen35_env_issue = _qwen35_primary_violation(
+                    model_name=first_model,
+                    policy=qwen35_policy,
+                    label="OPENCLAW_OLLAMA_MODEL_ORDER",
+                )
+                if qwen35_env_issue:
+                    issues.append(qwen35_env_issue)
+                else:
+                    ok.append(f".env model order primary = {first_model} (approved qwen3.5 primary)")
+            elif first_model != "qwen3:8b":
+                issues.append(
+                    f"[ERROR] OPENCLAW_OLLAMA_MODEL_ORDER first model is {first_model}, not qwen3:8b or approved qwen3.5 primary"
+                )
+            else:
+                ok.append(f".env model order: {env_model_order}")
         else:
             ok.append(f".env model order: {env_model_order}")
 
@@ -321,20 +436,6 @@ def main() -> int:
     else:
         ok.append(".env OPENCLAW_AUTONOMY_GUARD_ENABLED not set (runtime default: enabled)")
 
-    env_autonomy_approval = env.get("OPENCLAW_AUTONOMY_REQUIRE_APPROVAL_TOKEN", "")
-    if env_autonomy_approval and not _env_enabled(env_autonomy_approval, default=True):
-        issues.append("[CRITICAL] OPENCLAW_AUTONOMY_REQUIRE_APPROVAL_TOKEN is disabled")
-    elif env_autonomy_approval:
-        ok.append(f".env OPENCLAW_AUTONOMY_REQUIRE_APPROVAL_TOKEN = {env_autonomy_approval}")
-    else:
-        ok.append(".env OPENCLAW_AUTONOMY_REQUIRE_APPROVAL_TOKEN not set (runtime default: enabled)")
-
-    env_autonomy_prefix = env.get("OPENCLAW_AUTONOMY_POLICY_PREFIX_ENABLED", "")
-    if env_autonomy_prefix and not _env_enabled(env_autonomy_prefix, default=True):
-        warnings.append("OPENCLAW_AUTONOMY_POLICY_PREFIX_ENABLED is disabled")
-    elif env_autonomy_prefix:
-        ok.append(f".env OPENCLAW_AUTONOMY_POLICY_PREFIX_ENABLED = {env_autonomy_prefix}")
-
     env_injection_block = env.get("OPENCLAW_AUTONOMY_BLOCK_INJECTION_PATTERNS", "")
     if env_injection_block and _env_enabled(env_injection_block, default=False):
         ok.append(f".env OPENCLAW_AUTONOMY_BLOCK_INJECTION_PATTERNS = {env_injection_block}")
@@ -344,25 +445,63 @@ def main() -> int:
             "(recommended for fully autonomous web-heavy workflows)"
         )
 
-    env_approval_token = env.get("OPENCLAW_AUTONOMY_APPROVAL_TOKEN", "")
-    if env_approval_token:
-        if len(env_approval_token.strip()) < 8:
-            warnings.append("OPENCLAW_AUTONOMY_APPROVAL_TOKEN is short; use a non-trivial token")
+    env_approve_high_risk = env.get("OPENCLAW_APPROVE_HIGH_RISK", "")
+    if env_approve_high_risk:
+        if _env_enabled(env_approve_high_risk, default=False):
+            ok.append(f".env OPENCLAW_APPROVE_HIGH_RISK = {env_approve_high_risk}")
         else:
-            ok.append(".env OPENCLAW_AUTONOMY_APPROVAL_TOKEN = [set]")
+            warnings.append("OPENCLAW_APPROVE_HIGH_RISK is disabled; high-risk prompt-mode actions will stay blocked unless the run passes --approve-high-risk.")
+
+    legacy_autonomy_vars = [
+        name
+        for name in (
+            "OPENCLAW_AUTONOMY_REQUIRE_APPROVAL_TOKEN",
+            "OPENCLAW_AUTONOMY_APPROVAL_TOKEN",
+            "OPENCLAW_AUTONOMY_POLICY_PREFIX_ENABLED",
+        )
+        if env.get(name, "").strip()
+    ]
+    if legacy_autonomy_vars:
+        warnings.append(
+            "Legacy OpenClaw autonomy env vars are ignored by the current runtime: "
+            + ", ".join(sorted(legacy_autonomy_vars))
+            + ". Use OPENCLAW_APPROVE_HIGH_RISK or --approve-high-risk for trusted high-risk runs."
+        )
 
     # ===== 9. LLM CONFIG ALIGNMENT =====
     llm = llm_cfg.get("llm", {})
     active_model = llm.get("active_model", "")
     primary_model = llm.get("models", {}).get("primary", {}).get("name", "")
-    if active_model and "qwen3" not in active_model:
-        warnings.append(f"llm_config.yml active_model = {active_model} (should be qwen3:8b)")
-    elif active_model:
-        ok.append(f"llm_config.yml active_model = {active_model}")
-    if primary_model and "qwen3" not in primary_model:
-        warnings.append(f"llm_config.yml primary model = {primary_model} (should be qwen3:8b)")
-    elif primary_model:
-        ok.append(f"llm_config.yml primary model = {primary_model}")
+    if active_model:
+        if is_qwen35_variant(active_model):
+            active_issue = _qwen35_primary_violation(
+                model_name=active_model,
+                policy=qwen35_policy,
+                label="llm_config.yml active_model",
+            )
+            if active_issue:
+                issues.append(active_issue)
+            else:
+                ok.append(f"llm_config.yml active_model = {active_model} (approved qwen3.5 primary)")
+        elif "qwen3" not in active_model:
+            warnings.append(f"llm_config.yml active_model = {active_model} (should be qwen3:8b)")
+        else:
+            ok.append(f"llm_config.yml active_model = {active_model}")
+    if primary_model:
+        if is_qwen35_variant(primary_model):
+            primary_issue = _qwen35_primary_violation(
+                model_name=primary_model,
+                policy=qwen35_policy,
+                label="llm_config.yml primary model",
+            )
+            if primary_issue:
+                issues.append(primary_issue)
+            else:
+                ok.append(f"llm_config.yml primary model = {primary_model} (approved qwen3.5 primary)")
+        elif "qwen3" not in primary_model:
+            warnings.append(f"llm_config.yml primary model = {primary_model} (should be qwen3:8b)")
+        else:
+            ok.append(f"llm_config.yml primary model = {primary_model}")
 
     # ===== 10. MULTI-AGENT ARCHITECTURE =====
     agent_list = cfg.get("agents", {}).get("list", [])
@@ -455,6 +594,38 @@ def main() -> int:
         orphan_bindings = bound_agents - defined_ids
         if orphan_bindings:
             issues.append(f"[ERROR] Bindings reference undefined agents: {orphan_bindings}")
+
+    # ===== 11. CRON JOB SCHEMA =====
+    cron_payload, cron_error = _load_cron_jobs_payload()
+    cron_summary = summarize_cron_jobs(cron_payload)
+    if cron_error:
+        issues.append(f"[CRITICAL] {cron_error}")
+    elif cron_summary["status"] == "FAIL":
+        invalid_session_targets = int(cron_summary.get("invalid_session_target_count", 0) or 0)
+        malformed_jobs = int(cron_summary.get("jobs_invalid", 0) or 0)
+        if invalid_session_targets > 0:
+            issues.append(
+                "[CRITICAL] Cron jobs contain malformed agentTurn records: "
+                f"{invalid_session_targets} missing sessionTarget or invalid sessionTarget"
+            )
+        remaining_malformed = max(0, malformed_jobs - invalid_session_targets)
+        if remaining_malformed > 0:
+            issues.append(
+                "[CRITICAL] Cron jobs contain additional malformed records: "
+                f"{remaining_malformed}"
+            )
+    elif cron_summary["status"] == "WARN":
+        warnings.append(
+            "Cron jobs have structural warnings: "
+            f"{cron_summary.get('malformed_job_count', 0)} malformed, "
+            f"{cron_summary.get('delivery_fallback_ready_count', 0)} fallback-ready"
+        )
+    else:
+        ok.append(
+            "Cron jobs schema clean: "
+            f"{cron_summary.get('jobs_total', 0)} jobs, "
+            f"{cron_summary.get('delivery_fallback_ready_count', 0)} fallback-ready"
+        )
 
     # agentToAgent
     a2a = tools_cfg.get("agentToAgent", {})

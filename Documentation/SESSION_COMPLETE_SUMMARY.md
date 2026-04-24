@@ -688,3 +688,137 @@ Test status (command: `simpleTrader_env/bin/python -m pytest -q`):
 
 **Files intentionally untouched due parallel ownership:**
 - Existing modified/untracked files outside scoped commit (multiple `scripts/`, `models/`, `tests/`, docs) were left unchanged.
+
+---
+
+## 2026-04-16 Live Funnel / Synthetic Split-Brain Note
+
+**Root cause confirmed:**
+- The live funnel was not blocked by the `ts_signal_id` close linkage itself. `production_closed_trades` and `trade_close_linkages` already preserve non-synthetic closes with matching `ts_signal_id`.
+- The real structural bug was split-brain execution mode routing in `scripts/run_auto_trader.py`: `_generate_time_series_forecast()` read `EXECUTION_MODE` from process state instead of the resolved run mode, so stale shell/config state could route forecast audits to the wrong subdir and muddy live-vs-synthetic evidence.
+
+**Real fix applied:**
+- Threaded explicit `execution_mode` through the forecast generation helpers.
+- Synced `EXECUTION_MODE` to the resolved run mode inside the main trading loop so env fallback cannot drift from the actual live/synthetic decision.
+- Persisted `execution_mode` into patched forecast audit `signal_context` / `execution_decision` so later PnL and calibration evidence remains attributable over time.
+
+**What this does not change:**
+- No gate-threshold loosening.
+- No synthetic relabeling.
+- No fallback to stale latest audit files.
+- No change to contamination exclusion rules.
+
+**Evidence / tests:**
+- `python -m pytest tests/scripts/test_check_forecast_audits.py tests/scripts/test_run_auto_trader_integrity.py tests/scripts/test_run_auto_trader_config_guard.py tests/scripts/test_run_auto_trader_rejection_taxonomy.py`
+  - `70 passed`
+- `python -m pytest tests/scripts/test_parallel_forecast_bulk.py tests/scripts/test_parallel_pipeline_combined.py tests/scripts/test_bar_aware_trading_loop.py tests/scripts/test_hygiene_wiring.py -k "execution_mode or bar_aware_loop_skips_second_cycle or generate_forecasts_bulk or audit_dir"`
+  - `5 passed`
+
+**Interpretation for the live funnel:**
+- The dominant blocker is still conservative gating and `HOLD`/rejection behavior, not missing `ts_signal_id` linkage.
+- Any synthetic entries still appearing in logs are from synthetic-mode runs, not the live close path, and they remain excluded from canonical production evidence.
+
+---
+
+## 2026-04-16 Evidence Integrity / Drift Cleanup Note
+
+**Evidence persistence hardened:**
+- Added immutable history snapshots for calibration and barbell promotion evidence.
+- Calibration now writes both `logs/confidence_calibration.json` and a timestamped archive under `logs/confidence_calibration_history/`.
+- Barbell promotion evidence now writes both the latest pointer and an immutable archive under `reports/barbell_pnl_evidence_history/`.
+
+**Semantic drift trimmed:**
+- Marked historical "production ready" / "proof mode" prose as historical or proposed-only in the active docs.
+- Kept the live-funnel execution-mode propagation fix separate from this evidence cleanup; no thresholds were changed.
+
+**Validation:**
+- `python -m pytest tests/scripts/test_calibrate_confidence_thresholds.py tests/risk/test_barbell_promotion_gate.py`
+  - `16 passed`
+- `python -m pytest tests/scripts/test_validate_profitability_proof_hardening.py`
+  - `15 passed`
+
+---
+
+## 2026-04-17 OpenClaw Cron / Live-Funnel Integrity Note
+
+**Real fixes applied:**
+- Hardened cron contract handling so `agentTurn` jobs now fail closed on missing or non-string `sessionTarget` values instead of drifting into WARN-like ambiguity.
+- Fixed `cmd_cron_health` to validate against the full cron row inventory, not only the `invalid_jobs` subset, so WARN-level structural drift is visible instead of looking healthy.
+- Removed the low-level forecast audit fallback that re-read ambient `EXECUTION_MODE`; the live forecasting path now uses the explicit resolved mode only, which prevents stale shell state from redirecting evidence into the wrong audit lane.
+- Kept the runtime gating thresholds unchanged.
+
+**Diagnostics-only cleanup:**
+- Updated cron/exporter assertions to match the real Prometheus label shape.
+- Kept the existing offline exporter metrics and warnings, but did not use them to relax any live gates.
+
+**Validation:**
+- `python -m pytest tests/scripts/test_openclaw_remote_workflow.py tests/scripts/test_verify_openclaw_config.py tests/scripts/test_hygiene_wiring.py tests/scripts/test_parallel_forecast_bulk.py tests/scripts/test_pmx_observability_exporter.py -q`
+  - `46 passed`
+- `python -m py_compile scripts/openclaw_cron_contract.py scripts/openclaw_remote_workflow.py scripts/verify_openclaw_config.py scripts/run_auto_trader.py`
+  - passed
+
+---
+
+## 2026-04-17 Docker Live Path Readiness Note
+
+**Assessment:**
+- Docker assets are present and useful for staging, CI, and reproducible tests.
+- The repo is **not yet ready** to treat Docker as the canonical unattended live path.
+- The live-path blocker is a mismatch between the current Docker entrypoint and the repo's WSL-first runtime guardrails.
+
+**Why it is still a no-go:**
+- The production Docker command still defaults to a non-live help path rather than the real trading loop.
+- The runtime guard still rejects non-WSL execution.
+- The current docs present Docker as containerized infrastructure, but not as a proven live execution lane with restart-safe evidence persistence.
+
+**What must happen before Docker can become canonical:**
+- Start the real live loop inside the container by default.
+- Prove durable state and evidence persistence across restarts.
+- Add an explicit GPU profile instead of relying on host-specific behavior.
+- Update runtime guardrails and docs so the canonical live path is unambiguous.
+- Run a one-cycle smoke test that writes audits, PnL evidence, and calibration history inside the container.
+
+---
+
+## 2026-04-17 Safe Autonomous-Run Bootstrap Note
+
+**Real fixes applied:**
+- Normalized repo Python resolution so OpenClaw launchers and helpers prefer `PMX_PYTHON_BIN`, then `simpleTrader_env_win`, then the legacy `simpleTrader_env` fallback.
+- Hardened the local model bootstrap so `qwen3:8b` stays the default tool-calling primary, while `qwen3.5` variants only enter the safe chain when an explicit benchmark-policy file approves them.
+- Updated the local-LLM setup script to use the Windows venv path explicitly and keep `OPENCLAW_LOCAL_ONLY=1` with a local-first model order.
+- Sanitized cron jobs so stale `simpleTrader_env\\Scripts\\python.exe` payload text is rewritten during migration and reported in cron-health.
+- Added Telegram fallback behavior for WhatsApp listener failures while keeping relink manual and explicit.
+- Made health/orchestration fall back to deterministic evidence when all narration models fail, instead of hard-failing the status path.
+
+**Guardrails preserved:**
+- No trading thresholds, confidence gates, or ranking cutoffs were loosened.
+- The stuck-session cleanup still exists, but it now respects the low-level skip flags so deterministic test and recovery paths remain stable.
+
+**Validation:**
+- `python -m pytest tests/scripts/test_openclaw_models.py tests/utils/test_repo_python.py tests/scripts/test_openclaw_cron_contract.py tests/utils/test_openclaw_cli.py tests/scripts/test_llm_bridge_whatsapp_serialization.py tests/scripts/test_setup_openclaw_local_llm_contract.py tests/scripts/test_observability_stack_contract.py tests/scripts/test_openclaw_implementation_contract.py tests/scripts/test_openclaw_remote_workflow.py -q`
+  - `91 passed, 2 skipped, 1 xfailed`
+
+---
+
+## 2026-04-18 Functional Verification Note
+
+**Verified healthy:**
+- The targeted OpenClaw / live-funnel regressions are green, including the anti-pyramiding coercion fix and the runtime-status timeout fix.
+- `python -m pytest -m "not gpu and not slow" -q`
+  - `2540 passed, 6 skipped, 45 deselected, 11 xfailed`
+- `python -m pytest tests/scripts/test_hygiene_wiring.py tests/scripts/test_run_auto_trader_rejection_taxonomy.py -q`
+  - `33 passed`
+- `python -m pytest tests/scripts/test_project_runtime_status.py -q`
+  - `13 passed`
+- `python scripts/production_audit_gate.py --unattended-profile`
+  - `PASS` with `lift`, `proof`, and `gate` all passing.
+- `python scripts/project_runtime_status.py --pretty`
+  - `status: ok` after increasing the production-gate timeout budget.
+- `openclaw gateway probe --timeout 20000`
+  - `Reachable: yes`
+- `openclaw status --deep --timeout 20000`
+  - `Gateway reachable`, `Telegram OK`, `WhatsApp LINKED`.
+
+**Residual caveat:**
+- The default OpenClaw probe budgets are still too short on this machine. The gateway is healthy, but `openclaw status` without a larger timeout can report a false timeout.
+- The OpenClaw security audit still warns that the current live posture uses `sandbox=off` with web tools enabled for the small local model; that is an existing policy warning, not a repo regression.

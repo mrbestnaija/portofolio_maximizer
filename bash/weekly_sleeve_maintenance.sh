@@ -4,6 +4,7 @@ set -euo pipefail
 # Weekly sleeve maintenance pipeline:
 # 1) Aggregate sleeve performance
 # 2) Propose promotions/demotions (writes logs/automation/sleeve_promotion_plan.json)
+# 3) Build a shadow-first NAV rebalance sidecar (writes logs/automation/nav_rebalance_plan_latest.json)
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
@@ -18,6 +19,10 @@ LOOKBACK_DAYS="${LOOKBACK_DAYS:-365}"
 MIN_TRADES="${MIN_TRADES:-5}"
 SUMMARY_PATH="${SUMMARY_PATH:-logs/automation/sleeve_summary.json}"
 PROMO_PLAN_PATH="${PROMO_PLAN_PATH:-logs/automation/sleeve_promotion_plan.json}"
+NAV_REBALANCE_PATH="${NAV_REBALANCE_PATH:-logs/automation/nav_rebalance_plan_latest.json}"
+NAV_HANDOFF_STATUS_PATH="${NAV_HANDOFF_STATUS_PATH:-logs/automation/nav_rebalance_handoff_latest.json}"
+ELIGIBILITY_PATH="${ELIGIBILITY_PATH:-logs/ticker_eligibility.json}"
+ELIGIBILITY_GATES_PATH="${ELIGIBILITY_GATES_PATH:-logs/ticker_eligibility_gates.json}"
 
 echo "[weekly_sleeve_maintenance] summarizing sleeves..."
 "${PYTHON_BIN}" scripts/summarize_sleeves.py \
@@ -33,4 +38,21 @@ echo "[weekly_sleeve_maintenance] generating promotion/demotion plan..."
   --output "$PROMO_PLAN_PATH" \
   --min-trades "$MIN_TRADES"
 
-echo "[weekly_sleeve_maintenance] complete. Review $PROMO_PLAN_PATH before applying config changes."
+echo "[weekly_sleeve_maintenance] building shadow-first NAV rebalance plan..."
+"${PYTHON_BIN}" -m scripts.build_nav_rebalance_plan \
+  --eligibility-path "$ELIGIBILITY_PATH" \
+  --eligibility-gates-path "$ELIGIBILITY_GATES_PATH" \
+  --sleeve-summary-path "$SUMMARY_PATH" \
+  --sleeve-plan-path "$PROMO_PLAN_PATH" \
+  --risk-buckets-path "config/risk_buckets.yml" \
+  --output "$NAV_REBALANCE_PATH"
+
+echo "[weekly_sleeve_maintenance] evaluating NAV rebalance handoff..."
+"${PYTHON_BIN}" scripts/run_nav_rebalance_handoff.py \
+  --plan-path "$NAV_REBALANCE_PATH" \
+  --config-path "config/barbell.yml" \
+  --output "logs/automation/nav_allocation_latest.json" \
+  --staged-config "config/barbell.staged.yml" \
+  --status-output "$NAV_HANDOFF_STATUS_PATH"
+
+echo "[weekly_sleeve_maintenance] complete. Review $PROMO_PLAN_PATH and $NAV_REBALANCE_PATH before applying config changes."

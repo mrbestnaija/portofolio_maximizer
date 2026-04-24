@@ -2,7 +2,13 @@
 import json
 from pathlib import Path
 
+from scripts.openclaw_cron_contract import DEFAULT_SESSION_TARGET
+from utils.repo_python import resolve_repo_python
+
 JOBS_PATH = Path.home() / ".openclaw" / "cron" / "jobs.json"
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PYTHON_EXE = resolve_repo_python(PROJECT_ROOT)
+TELEGRAM_FALLBACK_TO = "+2348061573767"
 
 NEW_JOBS = [
     {
@@ -18,13 +24,13 @@ NEW_JOBS = [
         "createdAtMs": 1773878400000,
         "updatedAtMs": 1773878400000,
         "schedule": {"kind": "cron", "expr": "22 23 * * *"},
-        "sessionTarget": "isolated",
+        "sessionTarget": DEFAULT_SESSION_TARGET,
         "wakeMode": "now",
         "payload": {
             "kind": "agentTurn",
             "message": (
                 "Run JSONL label accumulation. Use exec to run exactly this single command:\n"
-                ".\\simpleTrader_env\\Scripts\\python.exe scripts\\accumulate_classifier_labels.py --json\n\n"
+                f"{PYTHON_EXE} scripts\\accumulate_classifier_labels.py --json\n\n"
                 "Parse the JSON output.\n\n"
                 "Rules:\n"
                 "- If n_new > 0: announce a short summary: "
@@ -38,7 +44,12 @@ NEW_JOBS = [
                 "- PowerShell rule: never chain commands with &&."
             ),
         },
-        "delivery": {"mode": "announce", "channel": "whatsapp", "to": "+2348061573767"},
+        "delivery": {
+            "mode": "announce",
+            "channel": "whatsapp",
+            "to": "+2348061573767",
+            "fallback": {"channel": "telegram", "to": TELEGRAM_FALLBACK_TO},
+        },
         "state": {"consecutiveErrors": 0, "nextRunAtMs": 1773957720000, "lastStatus": "pending"},
     },
     {
@@ -54,16 +65,16 @@ NEW_JOBS = [
         "createdAtMs": 1773878400000,
         "updatedAtMs": 1773878400000,
         "schedule": {"kind": "cron", "expr": "48 23 * * *"},
-        "sessionTarget": "isolated",
+        "sessionTarget": DEFAULT_SESSION_TARGET,
         "wakeMode": "now",
         "payload": {
             "kind": "agentTurn",
             "message": (
                 "Check if directional classifier needs retraining.\n\n"
                 "Step 1 - Dataset stats. Use exec:\n"
-                ".\\simpleTrader_env\\Scripts\\python.exe scripts\\check_classifier_readiness.py --json\n\n"
+                f"{PYTHON_EXE} scripts\\check_classifier_readiness.py --json\n\n"
                 "Step 2 - Model freshness. Use exec:\n"
-                ".\\simpleTrader_env\\Scripts\\python.exe -c \""
+                f"{PYTHON_EXE} -c \""
                 "import json,pathlib,time; "
                 "meta=pathlib.Path('models/directional_v1.meta.json'); "
                 "age=(time.time()-meta.stat().st_mtime)/86400 if meta.exists() else -1; "
@@ -78,9 +89,9 @@ NEW_JOBS = [
                 "  - outcome_linked >= 300 AND n_train < 300\n"
                 "  - outcome_linked >= 500 AND n_train < 500\n\n"
                 "Step 3 - Retrain (only if condition met). Use exec:\n"
-                ".\\simpleTrader_env\\Scripts\\python.exe scripts\\train_directional_classifier.py\n\n"
+                f"{PYTHON_EXE} scripts\\train_directional_classifier.py\n\n"
                 "Step 4 - Evaluate (only after successful retrain). Use exec:\n"
-                ".\\simpleTrader_env\\Scripts\\python.exe scripts\\evaluate_directional_classifier.py\n\n"
+                f"{PYTHON_EXE} scripts\\evaluate_directional_classifier.py\n\n"
                 "Rules:\n"
                 "- No retrain needed: respond NO_REPLY.\n"
                 "- Retrain ran: announce 'Classifier retrained: n_train={n_train} "
@@ -90,7 +101,12 @@ NEW_JOBS = [
                 "- PowerShell rule: never chain commands with &&."
             ),
         },
-        "delivery": {"mode": "announce", "channel": "whatsapp", "to": "+2348061573767"},
+        "delivery": {
+            "mode": "announce",
+            "channel": "whatsapp",
+            "to": "+2348061573767",
+            "fallback": {"channel": "telegram", "to": TELEGRAM_FALLBACK_TO},
+        },
         "state": {"consecutiveErrors": 0, "nextRunAtMs": 1773958080000, "lastStatus": "pending"},
     },
     {
@@ -105,13 +121,13 @@ NEW_JOBS = [
         "createdAtMs": 1773878400000,
         "updatedAtMs": 1773878400000,
         "schedule": {"kind": "cron", "expr": "17 9 * * 0"},
-        "sessionTarget": "isolated",
+        "sessionTarget": DEFAULT_SESSION_TARGET,
         "wakeMode": "now",
         "payload": {
             "kind": "agentTurn",
             "message": (
                 "Run weekly classifier gate readiness check. Use exec to run:\n"
-                ".\\simpleTrader_env\\Scripts\\python.exe scripts\\check_classifier_readiness.py --json\n\n"
+                f"{PYTHON_EXE} scripts\\check_classifier_readiness.py --json\n\n"
                 "Always announce a brief digest (never NO_REPLY for this job):\n"
                 "'Classifier gate [{verdict}]: {n_outcome_linked}/{gate_min_examples} outcome-linked. "
                 "Rate: {daily_accumulation_rate:.1f}/day. Est {days_to_ready_estimate}d to READY.'\n"
@@ -123,7 +139,12 @@ NEW_JOBS = [
                 "PowerShell rule: never chain commands with &&."
             ),
         },
-        "delivery": {"mode": "announce", "channel": "whatsapp", "to": "+2348061573767"},
+        "delivery": {
+            "mode": "announce",
+            "channel": "whatsapp",
+            "to": "+2348061573767",
+            "fallback": {"channel": "telegram", "to": TELEGRAM_FALLBACK_TO},
+        },
         "state": {"consecutiveErrors": 0, "nextRunAtMs": 1774004400000, "lastStatus": "pending"},
     },
     {
@@ -138,13 +159,13 @@ NEW_JOBS = [
         "createdAtMs": 1773878400000,
         "updatedAtMs": 1773878400000,
         "schedule": {"kind": "cron", "expr": "23 9 * * 1"},
-        "sessionTarget": "isolated",
+        "sessionTarget": DEFAULT_SESSION_TARGET,
         "wakeMode": "now",
         "payload": {
             "kind": "agentTurn",
             "message": (
                 "Audit ATR vs fallback stop-loss path usage. Use exec to run:\n"
-                ".\\simpleTrader_env\\Scripts\\python.exe -c \""
+                f"{PYTHON_EXE} -c \""
                 "import sqlite3,json; conn=sqlite3.connect('data/portfolio_maximizer.db'); "
                 "total=conn.execute('SELECT COUNT(*) FROM trade_executions "
                 "WHERE is_close=0 AND COALESCE(is_synthetic,0)=0 AND COALESCE(is_diagnostic,0)=0').fetchone()[0]; "
@@ -165,7 +186,12 @@ NEW_JOBS = [
                 "- PowerShell rule: never chain commands with &&."
             ),
         },
-        "delivery": {"mode": "announce", "channel": "whatsapp", "to": "+2348061573767"},
+        "delivery": {
+            "mode": "announce",
+            "channel": "whatsapp",
+            "to": "+2348061573767",
+            "fallback": {"channel": "telegram", "to": TELEGRAM_FALLBACK_TO},
+        },
         "state": {"consecutiveErrors": 0, "nextRunAtMs": 1774256400000, "lastStatus": "pending"},
     },
     {
@@ -180,16 +206,16 @@ NEW_JOBS = [
         "createdAtMs": 1773878400000,
         "updatedAtMs": 1773878400000,
         "schedule": {"kind": "cron", "expr": "47 18 * * 5"},
-        "sessionTarget": "isolated",
+        "sessionTarget": DEFAULT_SESSION_TARGET,
         "wakeMode": "now",
         "payload": {
             "kind": "agentTurn",
             "message": (
                 "Generate weekly live-ops digest. Run in sequence:\n\n"
                 "1. Label readiness. Use exec:\n"
-                ".\\simpleTrader_env\\Scripts\\python.exe scripts\\check_classifier_readiness.py --json\n\n"
+                f"{PYTHON_EXE} scripts\\check_classifier_readiness.py --json\n\n"
                 "2. Stop-loss performance (14d). Use exec:\n"
-                ".\\simpleTrader_env\\Scripts\\python.exe -c \""
+                f"{PYTHON_EXE} -c \""
                 "import sqlite3,json; conn=sqlite3.connect('data/portfolio_maximizer.db'); "
                 "s=conn.execute(\\\"SELECT COUNT(*),COALESCE(SUM(realized_pnl),0) FROM production_closed_trades "
                 "WHERE exit_reason LIKE '%stop%' AND trade_date>=date('now','-14 days')\\\").fetchone(); "
@@ -199,7 +225,7 @@ NEW_JOBS = [
                 "print(json.dumps({'stop_n':s[0],'stop_pnl':round(s[1],2),"
                 "'total_14d':t[0],'pnl_14d':round(t[1],2),'wr_14d':round(t[2],3)})); conn.close()\"\n\n"
                 "3. Classifier eval. Use exec:\n"
-                ".\\simpleTrader_env\\Scripts\\python.exe scripts\\evaluate_directional_classifier.py --json\n\n"
+                f"{PYTHON_EXE} scripts\\evaluate_directional_classifier.py --json\n\n"
                 "Always announce (never NO_REPLY). Format:\n"
                 "'[Weekly Digest {date}]\\n"
                 "- Labels: {n_outcome_linked}/500 outcome-linked ({daily_rate:.1f}/day, ~{days}d to gate)\\n"
@@ -210,7 +236,12 @@ NEW_JOBS = [
                 "PowerShell rule: never chain commands with &&."
             ),
         },
-        "delivery": {"mode": "announce", "channel": "whatsapp", "to": "+2348061573767"},
+        "delivery": {
+            "mode": "announce",
+            "channel": "whatsapp",
+            "to": "+2348061573767",
+            "fallback": {"channel": "telegram", "to": TELEGRAM_FALLBACK_TO},
+        },
         "state": {"consecutiveErrors": 0, "nextRunAtMs": 1774000020000, "lastStatus": "pending"},
     },
 ]

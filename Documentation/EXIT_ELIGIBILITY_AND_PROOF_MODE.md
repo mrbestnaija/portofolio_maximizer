@@ -1,5 +1,9 @@
 # Exit Eligibility Audit & Proof Mode Specification
 
+> Diagnostic/spec note: this document describes a proposed proof-mode remediation path,
+> not current runtime behavior unless the corresponding code path has been implemented
+> and tested. Treat the "Implementation Location" blocks as design notes.
+
 **Date**: 2026-01-29
 **Phase**: 7.9+ (Cross-Session Persistence)
 **Status**: Diagnostic -- 0 closed trades after 34 executions across 23 tickers
@@ -121,7 +125,7 @@ if current_position != 0 and current_price:
 
 ---
 
-## Step 4: Proof Mode -- Guaranteed Round Trips
+## Step 4: Proposed Proof Mode -- Guaranteed Round Trips
 
 ### Purpose
 

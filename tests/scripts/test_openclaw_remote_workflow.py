@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 from scripts import openclaw_remote_workflow as workflow
 
 
@@ -202,6 +205,119 @@ def test_check_channels_uses_recent_maintenance_snapshot_as_recovering_context()
     assert result["fallback_ready"] == ["telegram"]
 
 
+def test_load_channels_status_context_prefers_recent_maintenance_snapshot() -> None:
+    maintenance = {
+        "timestamp_utc": "2099-01-01T00:00:00+00:00",
+        "steps": {
+            "channels_status_snapshot": {
+                "channels": {
+                    "whatsapp": {
+                        "configured": True,
+                        "linked": True,
+                        "running": True,
+                        "connected": True,
+                    }
+                }
+            }
+        },
+    }
+
+    original_live = workflow._load_live_channels_status
+    original_recent = workflow._load_recent_maintenance_payload
+    workflow._load_live_channels_status = lambda timeout=20.0: (_ for _ in ()).throw(AssertionError("live probe should not run"))
+    workflow._load_recent_maintenance_payload = lambda: (maintenance, 1.0)
+    try:
+        result = workflow._load_channels_status_context()
+    finally:
+        workflow._load_live_channels_status = original_live
+        workflow._load_recent_maintenance_payload = original_recent
+
+    assert result["source"] == "maintenance_snapshot"
+    assert result["parsed"] is True
+    assert result["timeout"] is False
+    assert result["elapsed_ms"] == 0
+    assert result["payload"]["channels"]["whatsapp"]["connected"] is True
+
+
+def test_load_channels_status_context_uses_recent_maintenance_report_without_live_probe() -> None:
+    maintenance = {
+        "timestamp_utc": "2099-01-01T00:00:00+00:00",
+        "steps": {
+            "gateway_health": {
+                "rpc_ok": True,
+                "service_status": "running",
+                "primary_channel_issue_final": None,
+                "warnings": [],
+            }
+        },
+    }
+
+    original_live = workflow._load_live_channels_status
+    original_recent = workflow._load_recent_maintenance_payload
+    workflow._load_live_channels_status = lambda timeout=20.0: (_ for _ in ()).throw(AssertionError("live probe should not run"))
+    workflow._load_recent_maintenance_payload = lambda: (maintenance, 1.0)
+    try:
+        result = workflow._load_channels_status_context()
+    finally:
+        workflow._load_live_channels_status = original_live
+        workflow._load_recent_maintenance_payload = original_recent
+
+    assert result["source"] == "maintenance_report"
+    assert result["parsed"] is False
+    assert result["timeout"] is False
+    assert result["elapsed_ms"] == 0
+    assert result["payload"] is None
+
+
+def test_load_channels_status_context_uses_recent_maintenance_state_snapshot_without_live_probe() -> None:
+    maintenance = {
+        "timestamp_utc": "2099-01-01T00:00:00+00:00",
+        "steps": {
+            "gateway_health": {
+                "rpc_ok": True,
+                "service_status": "running",
+                "primary_channel_issue_final": None,
+                "warnings": [],
+            }
+        },
+    }
+    state = {
+        "updated_at_utc": "2099-01-01T00:00:00+00:00",
+        "last_channels_status_snapshot": {
+            "timestamp_utc": "2099-01-01T00:00:00+00:00",
+            "timestamp_ms": 123456,
+            "channels": {
+                "whatsapp": {
+                    "configured": True,
+                    "linked": True,
+                    "running": True,
+                    "connected": True,
+                }
+            },
+            "source": "probe",
+        },
+    }
+
+    original_live = workflow._load_live_channels_status
+    original_recent = workflow._load_recent_maintenance_payload
+    original_state = workflow._load_recent_maintenance_state
+    workflow._load_live_channels_status = lambda timeout=20.0: (_ for _ in ()).throw(AssertionError("live probe should not run"))
+    workflow._load_recent_maintenance_payload = lambda: (maintenance, 1.0)
+    workflow._load_recent_maintenance_state = lambda: (state, 1.0)
+    try:
+        result = workflow._load_channels_status_context()
+    finally:
+        workflow._load_live_channels_status = original_live
+        workflow._load_recent_maintenance_payload = original_recent
+        workflow._load_recent_maintenance_state = original_state
+
+    assert result["source"] == "maintenance_state_snapshot"
+    assert result["parsed"] is True
+    assert result["timeout"] is False
+    assert result["elapsed_ms"] == 0
+    assert result["payload"]["channels"]["whatsapp"]["connected"] is True
+
+
 def test_channel_test_uses_inferred_whatsapp_target_and_send_helper() -> None:
     calls: list[tuple[str, str, str]] = []
 
@@ -237,3 +353,171 @@ def test_bridge_test_runs_orchestrator_against_whatsapp_target() -> None:
 
     assert rc == 0
     assert calls == [("whatsapp", "+2347000000000", "status")]
+
+
+def test_cron_health_reports_missing_session_target_without_crashing(tmp_path: Path, monkeypatch) -> None:
+    jobs_path = tmp_path / "jobs.json"
+    jobs_path.write_text(
+        json.dumps(
+            {
+                "jobs": [
+                    {
+                        "id": "bad-job",
+                        "name": "[P2] Gate and Readiness Check",
+                        "agentId": "trading",
+                        "enabled": True,
+                        "schedule": {"kind": "cron", "expr": "*/10 * * * *"},
+                        "payload": {
+                            "kind": "agentTurn",
+                            "message": "do work",
+                        },
+                        "delivery": {"channel": "whatsapp"},
+                        "state": {"consecutiveErrors": 0, "lastStatus": "pending"},
+                    },
+                    {
+                        "id": "good-job",
+                        "name": "[P1] Healthy Job",
+                        "agentId": "ops",
+                        "enabled": True,
+                        "schedule": {"kind": "cron", "expr": "0 * * * *"},
+                        "sessionTarget": "isolated",
+                        "payload": {
+                            "kind": "agentTurn",
+                            "message": "ok",
+                        },
+                        "delivery": {"channel": "whatsapp", "fallback": {"channel": "telegram", "to": "telegram:6515478488"}},
+                        "state": {"consecutiveErrors": 0, "lastStatus": "success"},
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(workflow, "CRON_JOBS_PATH", jobs_path)
+
+    rc = workflow.cmd_cron_health(as_json=True)
+    assert rc == 2
+
+    # Re-run through the summary helper to keep the assertion focused on product behavior.
+    summary = workflow._check_cron_jobs()
+    assert summary["status"] == "FAIL"
+    assert summary["jobs_invalid"] == 1
+    assert summary["invalid_session_target_count"] == 1
+    assert summary["delivery_fallback_ready_count"] == 1
+
+
+def test_cron_health_surfaces_warn_rows_in_validation_output(tmp_path: Path, monkeypatch, capsys) -> None:
+    jobs_path = tmp_path / "jobs.json"
+    jobs_path.write_text(
+        json.dumps(
+            {
+                "jobs": [
+                    {
+                        "id": "warn-job",
+                        "name": "[P2] Missing Payload",
+                        "agentId": "trading",
+                        "enabled": True,
+                        "schedule": {"kind": "cron", "expr": "*/10 * * * *"},
+                        "sessionTarget": "isolated",
+                        "delivery": {"channel": "whatsapp"},
+                        "state": {"consecutiveErrors": 0, "lastStatus": "pending"},
+                    },
+                    {
+                        "id": "good-job",
+                        "name": "[P1] Healthy Job",
+                        "agentId": "ops",
+                        "enabled": True,
+                        "schedule": {"kind": "cron", "expr": "0 * * * *"},
+                        "sessionTarget": "isolated",
+                        "payload": {
+                            "kind": "agentTurn",
+                            "message": "ok",
+                        },
+                        "delivery": {"channel": "whatsapp", "fallback": {"channel": "telegram", "to": "telegram:6515478488"}},
+                        "state": {"consecutiveErrors": 0, "lastStatus": "success"},
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(workflow, "CRON_JOBS_PATH", jobs_path)
+
+    rc = workflow.cmd_cron_health(as_json=True)
+    stdout = capsys.readouterr().out
+    result = json.loads(stdout)
+
+    assert rc == 1
+    assert result["jobs"][0]["validation_status"] == "WARN"
+    assert "payload_missing" in result["jobs"][0]["validation_issues"]
+
+
+def test_cron_health_rejects_non_string_session_target_without_hiding_it(tmp_path: Path, monkeypatch, capsys) -> None:
+    jobs_path = tmp_path / "jobs.json"
+    jobs_path.write_text(
+        json.dumps(
+            {
+                "jobs": [
+                    {
+                        "id": "bad-job",
+                        "name": "[P2] Gate and Readiness Check",
+                        "agentId": "trading",
+                        "enabled": True,
+                        "schedule": {"kind": "cron", "expr": "*/10 * * * *"},
+                        "sessionTarget": 123,
+                        "payload": {
+                            "kind": "agentTurn",
+                            "message": "do work",
+                        },
+                        "delivery": {"channel": "whatsapp"},
+                        "state": {"consecutiveErrors": 0, "lastStatus": "pending"},
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(workflow, "CRON_JOBS_PATH", jobs_path)
+
+    rc = workflow.cmd_cron_health(as_json=True)
+    stdout = capsys.readouterr().out
+    result = json.loads(stdout)
+
+    assert rc == 2
+    assert result["jobs"][0]["validation_status"] == "FAIL"
+    assert "sessionTarget_not_string" in result["jobs"][0]["validation_issues"]
+
+
+def test_cron_health_surfaces_stale_python_path_count(tmp_path: Path, monkeypatch, capsys) -> None:
+    jobs_path = tmp_path / "jobs.json"
+    jobs_path.write_text(
+        json.dumps(
+            {
+                "jobs": [
+                    {
+                        "id": "rewrite-job",
+                        "name": "[P1] Rewrite Stale Python Path",
+                        "agentId": "training",
+                        "enabled": True,
+                        "schedule": {"kind": "cron", "expr": "0 3 * * *"},
+                        "sessionTarget": "isolated",
+                        "payload": {
+                            "kind": "agentTurn",
+                            "message": ".\\simpleTrader_env\\Scripts\\python.exe scripts\\check_classifier_readiness.py --json",
+                        },
+                        "delivery": {"channel": "whatsapp", "fallback": {"channel": "telegram", "to": "telegram:6515478488"}},
+                        "state": {"consecutiveErrors": 0, "lastStatus": "pending"},
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(workflow, "CRON_JOBS_PATH", jobs_path)
+
+    rc = workflow.cmd_cron_health(as_json=True)
+    stdout = capsys.readouterr().out
+    result = json.loads(stdout)
+
+    assert rc == 0
+    assert result["summary"]["stale_python_path_count"] == 1

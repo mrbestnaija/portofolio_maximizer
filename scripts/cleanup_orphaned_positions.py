@@ -28,10 +28,26 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+
 from integrity.sqlite_guardrails import guarded_sqlite_connect
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DB_PATH = os.path.join(ROOT, "data", "portfolio_maximizer.db")
+
+
+def _parse_id_filter(raw_ids: str) -> set[int]:
+    selected: set[int] = set()
+    for token in (raw_ids or "").split(","):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            selected.add(int(token))
+        except ValueError as exc:
+            raise ValueError(f"Invalid id value: {token!r}") from exc
+    return selected
 
 
 def _resolve_as_of_date(ticker: str, entry_price: float, hist_close: pd.Series) -> str:
@@ -48,10 +64,16 @@ def _replay_atr_exit(
 
     Returns dict with exit_price, exit_reason, pnl, pnl_pct, bars_held, exit_date.
     """
+    if isinstance(hist.index, pd.DatetimeIndex) and hist.index.tz is not None:
+        hist = hist.copy()
+        hist.index = hist.index.tz_convert("UTC").tz_localize(None)
+
     close = hist["Close"].squeeze()
     atr_series = (hist["High"] - hist["Low"]).squeeze().rolling(14).mean()
 
     entry_date = pd.Timestamp(as_of)
+    if isinstance(entry_date, pd.Timestamp) and entry_date.tzinfo is not None:
+        entry_date = entry_date.tz_convert("UTC").tz_localize(None)
     entry_loc = hist.index.get_indexer([entry_date], method="pad")[0]
     if entry_loc < 14:
         entry_loc = 14
@@ -117,12 +139,13 @@ def _replay_atr_exit(
     }
 
 
-def main(dry_run: bool = True) -> None:
-    if not os.path.exists(DB_PATH):
-        print(f"[ERROR] Database not found: {DB_PATH}")
+def main(dry_run: bool = True, *, db_path: str | None = None, only_ids: set[int] | None = None) -> None:
+    db_path = db_path or DB_PATH
+    if not os.path.exists(db_path):
+        print(f"[ERROR] Database not found: {db_path}")
         sys.exit(1)
 
-    conn = guarded_sqlite_connect(DB_PATH)
+    conn = guarded_sqlite_connect(db_path)
     conn.row_factory = sqlite3.Row
 
     # ---- Gather orphan BUYs (realized_pnl IS NULL) ----
@@ -130,6 +153,10 @@ def main(dry_run: bool = True) -> None:
         "SELECT id, ticker, shares, price FROM trade_executions "
         "WHERE realized_pnl IS NULL ORDER BY id"
     ).fetchall()
+
+    if only_ids:
+        selected_ids = {int(x) for x in only_ids if int(x) > 0}
+        orphan_buys = [row for row in orphan_buys if int(row["id"]) in selected_ids]
 
     if not orphan_buys:
         print("[OK] No orphaned positions found.")
@@ -280,5 +307,15 @@ if __name__ == "__main__":
         action="store_true",
         help="Actually apply changes (default is dry-run)",
     )
+    parser.add_argument(
+        "--ids",
+        default="",
+        help="Optional comma-separated trade_executions ids to target",
+    )
     args = parser.parse_args()
-    main(dry_run=not args.apply)
+    try:
+        selected_ids = _parse_id_filter(args.ids)
+    except ValueError as exc:
+        print(f"[ERROR] {exc}")
+        sys.exit(2)
+    main(dry_run=not args.apply, only_ids=selected_ids or None)

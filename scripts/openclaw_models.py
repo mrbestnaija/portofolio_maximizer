@@ -29,6 +29,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
+import tempfile
 import sys
 import urllib.error
 import urllib.request
@@ -39,6 +41,13 @@ from typing import Any, Optional
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
+_AGENT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+from utils.openclaw_model_policy import (  # noqa: E402
+    Qwen35Policy,
+    is_qwen35_variant,
+    load_qwen35_policy,
+)
 
 
 def _bootstrap_dotenv() -> None:
@@ -67,6 +76,49 @@ def _split_command(command: str) -> list[str]:
         return _split(command)
     except Exception:
         return [str(command or "openclaw").strip() or "openclaw"]
+
+
+def _auth_store_root() -> Path:
+    return Path.home() / ".openclaw" / "agents"
+
+
+def _validate_agent_id(agent_id: str) -> str:
+    text = str(agent_id or "").strip()
+    if not text:
+        raise ValueError("agent_id is required")
+    if not _AGENT_ID_PATTERN.fullmatch(text):
+        raise ValueError(f"invalid agent_id: {text!r}")
+    return text
+
+
+def _write_text_atomic(path: Path, text: str) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path: Optional[Path] = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="\n",
+            delete=False,
+            dir=str(path.parent),
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+        ) as tmp:
+            tmp.write(str(text))
+            tmp.flush()
+            try:
+                os.fsync(tmp.fileno())
+            except Exception:
+                pass
+            tmp_path = Path(tmp.name)
+        os.replace(str(tmp_path), str(path))
+    finally:
+        if tmp_path is not None and tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except Exception:
+                pass
 
 
 @dataclass(frozen=True)
@@ -171,7 +223,7 @@ def _update_openclaw_json_agents_list(
             agents = {}
             payload["agents"] = agents
         agents["list"] = list(agents_list)
-        config_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8", newline="\n")
+        _write_text_atomic(config_path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
         return _CmdResult(ok=True, returncode=0, stdout="", stderr="")
     except FileNotFoundError as exc:
         return _CmdResult(ok=False, returncode=127, stdout="", stderr=str(exc))
@@ -238,27 +290,73 @@ def _pick_primary(preferred: list[str], available: list[str]) -> Optional[str]:
     return available[0] if available else None
 
 
-def _promote_tool_primary(order: list[str]) -> list[str]:
+def _promote_tool_primary(
+    order: list[str],
+    *,
+    qwen35_policy: Optional[Qwen35Policy] = None,
+) -> list[str]:
     """
     Keep a tool-capable model first for OpenClaw agent turns.
     """
-    models = [str(x).strip() for x in order if str(x).strip()]
+    policy = qwen35_policy or load_qwen35_policy(base_dir=PROJECT_ROOT)
+    models = _filter_safe_local_tool_models(order, qwen35_policy=policy)
     if not models:
         return models
     if (os.getenv("OPENCLAW_RESPECT_ENV_MODEL_ORDER") or "").strip().lower() in {"1", "true", "yes", "on"}:
         return models
 
+    if policy.primary_allowed and policy.preferred_primary:
+        return [policy.preferred_primary, *[m for m in models if m != policy.preferred_primary]]
+
+    canonical_primary = "qwen3:8b"
+    if canonical_primary in models:
+        return [canonical_primary, *[m for m in models if m != canonical_primary]]
+
     tool_candidates: list[str] = []
     for m in models:
         low = m.lower()
+        if is_qwen35_variant(m):
+            continue
         if "qwen3" in low or "qwen2.5" in low:
             tool_candidates.append(m)
 
     if not tool_candidates:
+        if policy.fallback_allowed:
+            qwen35_candidates = [m for m in models if is_qwen35_variant(m)]
+            if qwen35_candidates:
+                first_tool = qwen35_candidates[0]
+                return [first_tool, *[m for m in models if m != first_tool]]
         return models
 
     first_tool = tool_candidates[0]
     return [first_tool, *[m for m in models if m != first_tool]]
+
+
+def _is_unsafe_local_tool_model(model_id: str, *, qwen35_policy: Optional[Qwen35Policy] = None) -> bool:
+    low = (model_id or "").lower().strip()
+    if "qwen3.5" not in low:
+        return False
+    policy = qwen35_policy or load_qwen35_policy(base_dir=PROJECT_ROOT)
+    return not (policy.fallback_allowed or policy.primary_allowed)
+
+
+def _filter_safe_local_tool_models(
+    order: list[str],
+    *,
+    qwen35_policy: Optional[Qwen35Policy] = None,
+) -> list[str]:
+    policy = qwen35_policy or load_qwen35_policy(base_dir=PROJECT_ROOT)
+    models: list[str] = []
+    seen: set[str] = set()
+    for raw in order:
+        m = str(raw or "").strip()
+        if not m or _is_unsafe_local_tool_model(m, qwen35_policy=policy):
+            continue
+        if m in seen:
+            continue
+        seen.add(m)
+        models.append(m)
+    return models
 
 
 def _prune_non_local_allowlist_refs(existing_models: Any) -> tuple[dict[str, Any], list[str]]:
@@ -304,7 +402,16 @@ def _simple_model_def(*, model_id: str, name: Optional[str] = None, input_types:
 
 
 def _auth_store_path_for_agent(agent_id: str) -> Path:
-    return Path.home() / ".openclaw" / "agents" / agent_id / "agent" / "auth-profiles.json"
+    safe_agent_id = _validate_agent_id(agent_id)
+    agent_root = _auth_store_root() / safe_agent_id / "agent"
+    store_path = agent_root / "auth-profiles.json"
+    resolved_agent_root = agent_root.resolve(strict=False)
+    resolved_store_path = store_path.resolve(strict=False)
+    try:
+        resolved_store_path.relative_to(resolved_agent_root)
+    except Exception as exc:
+        raise ValueError(f"refusing auth store path outside agent directory: {safe_agent_id!r}") from exc
+    return store_path
 
 
 def _detect_default_agent_id(*, oc_base: list[str]) -> str:
@@ -418,8 +525,7 @@ def _sync_auth_store(
         return changed, ["DRY-RUN: " + m for m in msgs]
 
     if changed:
-        store_path.parent.mkdir(parents=True, exist_ok=True)
-        store_path.write_text(json.dumps(obj, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
+        _write_text_atomic(store_path, json.dumps(obj, indent=2, sort_keys=True) + "\n")
 
     return changed, msgs
 
@@ -506,9 +612,14 @@ def _cmd_status(args) -> int:
     _bootstrap_dotenv()
 
     oc_base = _split_command(args.command)
-    agent_id = _detect_default_agent_id(oc_base=oc_base)
-    store_path = _auth_store_path_for_agent(agent_id)
+    try:
+        agent_id = _detect_default_agent_id(oc_base=oc_base)
+        store_path = _auth_store_path_for_agent(agent_id)
+    except ValueError as exc:
+        print(f"[openclaw_models] invalid agent id: {exc}", file=sys.stderr)
+        return 2
 
+    qwen35_policy = load_qwen35_policy(base_dir=PROJECT_ROOT)
     model_cfg = _oc_config_get_json(oc_base=oc_base, path="agents.defaults.model", timeout_seconds=10.0) or {}
     img_cfg = _oc_config_get_json(oc_base=oc_base, path="agents.defaults.imageModel", timeout_seconds=10.0) or {}
     providers = _oc_config_get_json(oc_base=oc_base, path="models.providers", timeout_seconds=10.0) or {}
@@ -559,6 +670,12 @@ def _cmd_status(args) -> int:
     print(f"  OpenClaw auth anthropic: {'yes' if has_anth_store else 'no'}")
     print(f"  OpenClaw auth ollama: {'yes' if has_ollama_store else 'no'}")
     print(f"  Ollama reachable: {'yes' if bool(discovered) else 'no'} (models={len(discovered)})")
+    print(f"  qwen3.5 policy path: {qwen35_policy.policy_path}")
+    print(f"  qwen3.5 benchmark status: {qwen35_policy.benchmark_status}")
+    print(f"  qwen3.5 fallback allowed: {'yes' if qwen35_policy.fallback_allowed else 'no'}")
+    print(f"  qwen3.5 primary allowed: {'yes' if qwen35_policy.primary_allowed else 'no'}")
+    if qwen35_policy.preferred_primary:
+        print(f"  qwen3.5 preferred primary: {qwen35_policy.preferred_primary}")
     if bool(args.list_ollama_models) and discovered:
         for name in discovered[:50]:
             print(f"    - {name}")
@@ -571,8 +688,12 @@ def _cmd_sync_auth(args) -> int:
     _bootstrap_dotenv()
 
     oc_base = _split_command(args.command)
-    agent_id = (args.agent_id or "").strip() or _detect_default_agent_id(oc_base=oc_base)
-    store_path = _auth_store_path_for_agent(agent_id)
+    try:
+        agent_id = (args.agent_id or "").strip() or _detect_default_agent_id(oc_base=oc_base)
+        store_path = _auth_store_path_for_agent(agent_id)
+    except ValueError as exc:
+        print(f"[openclaw_models] invalid agent id: {exc}", file=sys.stderr)
+        return 2
 
     openai_key = _load_secret("OPENAI_API_KEY")
     anthropic_key = _load_secret("ANTHROPIC_API_KEY") or _load_secret("CLAUDE_API_KEY")
@@ -604,14 +725,19 @@ def _cmd_apply(args) -> int:
     _bootstrap_dotenv()
 
     oc_base = _split_command(args.command)
-    agent_id = (args.agent_id or "").strip() or _detect_default_agent_id(oc_base=oc_base)
-    store_path = _auth_store_path_for_agent(agent_id)
+    try:
+        agent_id = (args.agent_id or "").strip() or _detect_default_agent_id(oc_base=oc_base)
+        store_path = _auth_store_path_for_agent(agent_id)
+    except ValueError as exc:
+        print(f"[openclaw_models] invalid agent id: {exc}", file=sys.stderr)
+        return 2
 
     dry_run = bool(args.dry_run)
 
     openai_key = _load_secret("OPENAI_API_KEY")
     anthropic_key = _load_secret("ANTHROPIC_API_KEY") or _load_secret("CLAUDE_API_KEY")
     ollama_key = (os.getenv("OPENCLAW_OLLAMA_API_KEY") or os.getenv("OLLAMA_API_KEY") or "local").strip() or "local"
+    qwen35_policy = load_qwen35_policy(base_dir=PROJECT_ROOT)
 
     if bool(args.sync_auth):
         _, msgs = _sync_auth_store(
@@ -643,10 +769,16 @@ def _cmd_apply(args) -> int:
         (args.ollama_base_url or "").strip()
         or (os.getenv("OPENCLAW_OLLAMA_BASE_URL") or os.getenv("OLLAMA_HOST") or "http://127.0.0.1:11434").strip()
     )
-    ollama_models = _parse_csv(args.ollama_models or "") or _parse_csv(os.getenv("OPENCLAW_OLLAMA_MODELS", ""))
-    discovered = _discover_ollama_models(ollama_base_url, timeout_seconds=2.0)
+    ollama_models = _filter_safe_local_tool_models(
+        _parse_csv(args.ollama_models or "") or _parse_csv(os.getenv("OPENCLAW_OLLAMA_MODELS", "")),
+        qwen35_policy=qwen35_policy,
+    )
+    discovered = _filter_safe_local_tool_models(
+        _discover_ollama_models(ollama_base_url, timeout_seconds=2.0),
+        qwen35_policy=qwen35_policy,
+    )
     if not ollama_models:
-        ollama_models = discovered or _default_ollama_model_order()
+        ollama_models = discovered or _filter_safe_local_tool_models(_default_ollama_model_order())
 
     if bool(args.enable_ollama_provider):
         ollama_provider = {
@@ -738,8 +870,9 @@ def _cmd_apply(args) -> int:
 
     preferred_local = _default_ollama_model_order()
     preferred_local = _parse_csv(os.getenv("OPENCLAW_OLLAMA_MODEL_ORDER", "")) or preferred_local
-    preferred_local = _promote_tool_primary(preferred_local)
-    local_primary = _pick_primary(preferred_local, discovered or ollama_models)
+    preferred_local = _promote_tool_primary(preferred_local, qwen35_policy=qwen35_policy)
+    available_local_models = discovered or ollama_models
+    local_primary = _pick_primary(preferred_local, available_local_models)
 
     include_openai = bool(args.enable_openai_provider) and (
         _auth_has_provider_key(store_path=store_path, provider="openai") or bool(openai_key) or dry_run
@@ -759,8 +892,8 @@ def _cmd_apply(args) -> int:
         fallbacks = env_fallbacks
     elif strategy == "remote-first":
         primary = "qwen-portal/coder-model"
-        local_ordered = [m for m in preferred_local if m in (discovered or ollama_models)] + [
-            m for m in (discovered or ollama_models) if m not in set(preferred_local)
+        local_ordered = [m for m in preferred_local if m in available_local_models] + [
+            m for m in available_local_models if m not in set(preferred_local)
         ]
         fallbacks = _build_fallbacks(
             local_models_ordered=local_ordered,
@@ -773,6 +906,7 @@ def _cmd_apply(args) -> int:
     else:
         # auto / local-first
         # local-first NEVER uses remote models -- prevents 429 quota errors.
+        canonical_local_primary = "qwen3:8b"
         include_remote_qwen = False
         if strategy == "auto" and not local_only:
             include_remote_qwen = True
@@ -788,19 +922,23 @@ def _cmd_apply(args) -> int:
             else:
                 print(
                     "[openclaw_models] OPENCLAW_LOCAL_ONLY=1 ignoring OPENCLAW_INCLUDE_REMOTE_QWEN_FALLBACK=1"
-                )
-        have_local_now = bool(discovered)
+        )
+        have_local_now = bool(available_local_models)
+        safe_preferred_local = _filter_safe_local_tool_models(preferred_local, qwen35_policy=qwen35_policy)
+        safe_discovered = _filter_safe_local_tool_models(available_local_models, qwen35_policy=qwen35_policy)
         if strategy == "auto" and not have_local_now and not local_only:
             primary = "qwen-portal/coder-model"
+        elif local_only or strategy == "local-first":
+            primary = f"ollama/{local_primary or canonical_local_primary}"
         elif local_primary:
             primary = f"ollama/{local_primary}"
         else:
             # Even if Ollama is unreachable, set local model as primary.
             # OpenClaw will retry when Ollama comes back online.
-            primary = f"ollama/{preferred_local[0]}" if preferred_local else "ollama/qwen3:8b"
+            primary = f"ollama/{canonical_local_primary}"
 
-        local_ordered = [m for m in preferred_local if m in (discovered or ollama_models)] + [
-            m for m in (discovered or ollama_models) if m not in set(preferred_local)
+        local_ordered = [m for m in safe_preferred_local if m in safe_discovered] + [
+            m for m in safe_discovered if m not in set(safe_preferred_local)
         ]
         fallbacks = _build_fallbacks(
             local_models_ordered=[m for m in local_ordered if f"ollama/{m}" != primary],

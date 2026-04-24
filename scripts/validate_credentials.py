@@ -196,7 +196,7 @@ def main(argv: List[str]) -> int:
     )
 
     # OpenClaw optional remote channels (optional)
-    tg_ok, tg_line = _report_group("telegram_bot_token", ["TELEGRAM_BOT_TOKEN"])
+    tg_ok, tg_line = _report_group("telegram_bot_token", ["TELEGRAM_BOT_TOKEN", "OPENCLAW_TELEGRAM_BOT_TOKEN", "TELEGRAM_HTTP_API_TOKEN"])
     dc_ok, dc_line = _report_group("discord_bot_token", ["DISCORD_BOT_TOKEN", "DISCORD_TOKEN"])
     sb_ok, sb_line = _report_group("slack_bot_token", ["SLACK_BOT_TOKEN", "SLACK_TOKEN"])
     sa_ok, sa_line = _report_group("slack_app_token", ["SLACK_APP_TOKEN", "SLACK_SOCKET_MODE_TOKEN"])

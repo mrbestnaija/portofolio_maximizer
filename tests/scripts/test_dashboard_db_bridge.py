@@ -94,6 +94,71 @@ def test_build_dashboard_payload_from_sqlite(tmp_path) -> None:
     assert {e["event_type"] for e in payload["trade_events"]} == {"ENTRY", "EXIT_PROFIT"}
 
 
+def test_build_dashboard_payload_exposes_production_tracking(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "pmx.db"
+    _make_minimal_db(db_path)
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "CREATE TABLE performance_metrics(id INTEGER PRIMARY KEY, total_return REAL, total_return_pct REAL, win_rate REAL, profit_factor REAL, num_trades INTEGER, created_at TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO performance_metrics(total_return,total_return_pct,win_rate,profit_factor,num_trades,created_at) VALUES (?,?,?,?,?,?)",
+            (10.0, 0.01, 0.6, 1.5, 3, "2026-01-02T00:00:00Z"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    charts_dir = tmp_path / "charts"
+    charts_dir.mkdir()
+    ngn_chart = charts_dir / "ngn_hurdle_progress.png"
+    thin_chart = charts_dir / "thin_linkage_progress.png"
+    ngn_chart.write_bytes(b"png")
+    thin_chart.write_bytes(b"png")
+
+    metrics_path = tmp_path / "metrics_summary.json"
+    metrics_path.write_text(
+        json.dumps(
+            {
+                "status": "PASS",
+                "warnings": [],
+                "sufficiency": {"status": "SUFFICIENT"},
+                "chart_paths": {
+                    "ngn_hurdle_progress": str(ngn_chart),
+                    "thin_linkage_progress": str(thin_chart),
+                },
+                "production_tracking": {
+                    "ngn_hurdle": {"roi_ann_pct": 18.0, "beats_hurdle": False},
+                    "thin_linkage": {"matched_current": 2, "matched_threshold": 10},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(mod, "DEFAULT_PERFORMANCE_METRICS_PATH", metrics_path)
+
+    conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        payload = mod.build_dashboard_payload(
+            conn=conn,
+            tickers=["AAPL"],
+            lookback_days=10,
+            max_signals=10,
+            max_trades=10,
+            db_path=db_path,
+            read_path=db_path,
+        )
+    finally:
+        conn.close()
+
+    assert payload["production_tracking"]["ngn_hurdle"]["roi_ann_pct"] == 18.0
+    assert payload["production_tracking"]["thin_linkage"]["matched_current"] == 2
+    assert payload["robustness"]["chart_paths"]["ngn_hurdle_progress"] == str(ngn_chart)
+    assert payload["robustness"]["chart_paths"]["thin_linkage_progress"] == str(thin_chart)
+
+
 def test_dashboard_contract_validator_flags_missing_sections_and_staleness() -> None:
     report = mod.validate_dashboard_payload_contract(
         {
@@ -136,6 +201,59 @@ def test_bridge_merges_run_auto_trader_producer_artifact(tmp_path) -> None:
                 "equity": [{"t": "start", "v": 100.0}, {"t": "end", "v": 101.0}],
                 "equity_realized": [{"t": "start", "v": 100.0}, {"t": "end", "v": 100.5}],
                 "forecaster_health": {"status": {"profit_factor_ok": True}},
+                "canonical_snapshot": {
+                    "schema_version": 4,
+                    "gate": {
+                        "freshness_status": {"status": "fresh", "age_minutes": 15.0, "expected_max_age_minutes": 1440.0},
+                        "warmup_state": {"posture": "expired", "deadline_utc": "2026-04-24T20:00:00Z", "matched_needed": 0},
+                        "trajectory_alarm": {"active": False},
+                        "post_deadline_time_to_10_estimate": {"status": "inactive", "estimated_days": None},
+                    },
+                    "summary": {
+                        "ann_roi_pct": 9.86,
+                        "roi_ann_pct": 9.86,
+                        "deployment_pct": 1.83,
+                        "objective_score": 18.05,
+                        "objective_valid": True,
+                        "evidence_health": "clean",
+                        "unattended_gate": "PASS",
+                        "unattended_ready": True,
+                    },
+                    "alpha_objective": {
+                        "roi_ann_pct": 9.86,
+                        "deployment_pct": 1.83,
+                        "objective_score": 18.05,
+                        "objective_valid": True,
+                    },
+                    "alpha_model_quality": {
+                        "status": "available",
+                        "target_amplitude_hit_rate": 0.75,
+                        "target_amplitude_hit_rate_rolling_20": 0.80,
+                        "target_amplitude_hit_count": 8,
+                        "target_amplitude_support": 8,
+                        "domain_objective_version": "v1.0.0",
+                    },
+                    "thin_linkage": {"matched_current": 10, "matched_needed": 0},
+                    "source_contract": {
+                        "status": "clean",
+                        "canonical_sources": [
+                            {"metric": "closed_pnl", "source_file": "production_closed_trades", "query_or_key": "production_closed_trades"}
+                        ],
+                        "allowlisted_readers": ["scripts/dashboard_db_bridge.py"],
+                        "violations_found": [],
+                        "scan_timestamp_utc": "2026-04-18T12:00:00Z",
+                    },
+                },
+                "preprocess_health": {
+                    "status": "WARN",
+                    "summary": {"snapshots": 1, "production_ok_runs": 0},
+                    "latest": {"status": "WARN", "quality_tag": "HIGH_IMPUTE"},
+                },
+                "orchestration_health": {
+                    "status": "WARN",
+                    "summary": {"snapshots": 1, "oos_source_counts": {"latest_metrics": 1}},
+                    "latest": {"oos_source": "latest_metrics", "garch_unstable": True},
+                },
             }
         ),
         encoding="utf-8",
@@ -156,6 +274,11 @@ def test_bridge_merges_run_auto_trader_producer_artifact(tmp_path) -> None:
     assert merged["routing"]["ts_signals"] == 7
     assert merged["equity"][-1]["v"] == 101.0
     assert merged["forecaster_health"]["status"]["profit_factor_ok"] is True
+    assert merged["canonical_snapshot"]["summary"]["ann_roi_pct"] == pytest.approx(9.86)
+    assert merged["canonical_snapshot_contract"]["ok"] is True
+    assert merged["canonical_snapshot_contract"]["alpha_model_quality_status"] == "available"
+    assert merged["preprocess_health"]["latest"]["quality_tag"] == "HIGH_IMPUTE"
+    assert merged["orchestration_health"]["latest"]["oos_source"] == "latest_metrics"
 
 
 def test_positions_fallback_uses_average_cost(tmp_path) -> None:

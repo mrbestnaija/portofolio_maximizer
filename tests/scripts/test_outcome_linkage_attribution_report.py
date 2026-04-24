@@ -52,7 +52,7 @@ def _seed_db(db_path: Path) -> None:
             (id, ticker, trade_date, bar_timestamp, action, price, realized_pnl, exit_reason,
              ts_signal_id, holding_period_days, entry_trade_id, entry_price, exit_price, is_close)
             VALUES
-            (2, 'AAPL', '2026-03-03', '2026-03-03T00:00:00Z', 'SELL', 105.0, 5.0, 'TIME_EXIT',
+            (2, 'AAPL', '2026-03-03', '2026-03-03T00:00:00Z', 'SELL', 105.0, 5.0, 'TAKE_PROFIT',
              'ts_AAPL_1', 2, 1, 100.0, 105.0, 1)
             """
         )
@@ -82,6 +82,7 @@ def _seed_db(db_path: Path) -> None:
 def _seed_audit(audit_dir: Path) -> None:
     audit_dir.mkdir(parents=True, exist_ok=True)
     payload = {
+        "event_type": "TRADE_FORECAST_AUDIT",
         "dataset": {
             "ticker": "AAPL",
             "forecast_horizon": 6,
@@ -91,6 +92,7 @@ def _seed_audit(audit_dir: Path) -> None:
             "ts_signal_id": "ts_AAPL_1",
             "ticker": "AAPL",
             "run_id": "test_run",
+            "snr": 2.5,
             "entry_ts": "2026-03-01T00:00:00Z",
             "forecast_horizon": 6,
         },
@@ -114,8 +116,21 @@ def test_build_report_links_closed_trade_to_forecast_audit(tmp_path: Path) -> No
     assert summary["total_ts_trades"] == 1
     assert summary["linked_ts_trades"] == 1
     assert summary["linked_ts_trade_ratio"] == 1.0
-    assert summary["ts_trade_coverage"] == 0.5
-    assert summary["linked_correct_direction_negative_count"] == 0
+    assert summary["ts_trade_coverage"] == 1.0
+    assert summary["take_profit_count"] == 1
+    assert summary["fast_take_profit_count"] == 1
+    assert summary["fast_take_profit_rate"] == 1.0
+    assert summary["target_amplitude_hit_definition"] == "terminal_return_proxy"
+    assert summary["fast_take_profit_median_reliable"] is False
+    assert summary["multiway_table_tp_needed"] == 29
+    assert summary["multiway_table_estimated_trading_days_at_current_rate"] == 29.0
+    assert summary["take_profit_filter_threshold_source"] == "fallback_0.15"
+    assert summary["snr_tercile_support_threshold"] == 5
+    assert summary["multiway_table_status"] == "HIDDEN_UNTIL_SUPPORT"
+    assert summary["snr_terciles"]
+    assert all("take_profit" in item and "fast_take_profit" in item for item in summary["snr_terciles"])
+    assert all(item["reliability"] == "low_sample" for item in summary["snr_terciles"])
+    assert all(item["reliability_support_threshold"] == 5 for item in summary["snr_terciles"])
     assert summary["high_integrity_violation_count"] == 0
     assert summary["close_before_entry_count"] == 0
     assert summary["closed_missing_exit_reason_count"] == 0
@@ -129,6 +144,9 @@ def test_build_report_links_closed_trade_to_forecast_audit(tmp_path: Path) -> No
     assert ts_rec["realized_direction"] == "UP"
     assert ts_rec["direction_match"] is True
     assert ts_rec["audit_file"] == "forecast_audit_test.json"
+    assert ts_rec["take_profit_hit"] is True
+    assert ts_rec["fast_take_profit_hit"] is True
+    assert ts_rec["holding_period_at_exit"] == 2
 
     assert legacy_rec["outcome_linked"] is False
     assert legacy_rec["realized_direction"] == "DOWN"

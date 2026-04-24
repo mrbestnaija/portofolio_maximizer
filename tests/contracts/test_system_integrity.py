@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import sqlite3
 import tempfile
 from pathlib import Path
@@ -141,8 +142,14 @@ class TestSC02AccumulatorDbStatus:
         conn = sqlite3.connect(str(db))
         conn.execute(
             "CREATE TABLE trade_executions "
-            "(ts_signal_id TEXT, realized_pnl REAL, is_close INTEGER, "
-            "is_diagnostic INTEGER, is_synthetic INTEGER)"
+            "(ticker TEXT, ts_signal_id TEXT, realized_pnl REAL, exit_reason TEXT, entry_price REAL, "
+            "close_size REAL, shares REAL, holding_period_days INTEGER, effective_horizon INTEGER, "
+            "is_close INTEGER, is_diagnostic INTEGER, is_synthetic INTEGER)"
+        )
+        conn.execute(
+            "CREATE VIEW production_closed_trades AS "
+            "SELECT * FROM trade_executions WHERE is_close = 1 "
+            "AND COALESCE(is_diagnostic, 0) = 0 AND COALESCE(is_synthetic, 0) = 0"
         )
         conn.commit()
         conn.close()
@@ -285,6 +292,100 @@ class TestMW04DisableEnsembleFlagWiring:
         assert "DISABLE_DEFAULT" in src or "DISABLE" in src, (
             "MW-04: flag must produce a DISABLE_DEFAULT or equivalent decision"
         )
+
+
+# ---------------------------------------------------------------------------
+# TP-01  TAKE_PROFIT policy constants must have a single definition
+# ---------------------------------------------------------------------------
+
+class TestTP01PolicyConstantSingleDefinition:
+    """TP-01: policy constants must live only in etl/domain_objective.py."""
+
+    def test_constants_are_defined_only_in_domain_objective(self):
+        from etl.domain_objective import (
+            DOMAIN_OBJECTIVE_VERSION,
+            MIN_OMEGA_VS_HURDLE,
+            MIN_TAKE_PROFIT_FREQUENCY,
+            SYSTEM_OBJECTIVE,
+            TAKE_PROFIT_FILTER_THRESHOLD_FALLBACK,
+            TARGET_AMPLITUDE_MULTIPLIER,
+        )
+
+        assert SYSTEM_OBJECTIVE == "TAKE_PROFIT_CAPTURE"
+        assert DOMAIN_OBJECTIVE_VERSION == "v1.0.0"
+        assert MIN_OMEGA_VS_HURDLE == 1.0
+        assert MIN_TAKE_PROFIT_FREQUENCY == 0.095
+        assert TARGET_AMPLITUDE_MULTIPLIER == 2.0
+        assert TAKE_PROFIT_FILTER_THRESHOLD_FALLBACK == 0.15
+        assert os.getenv("PMX_DISABLE_GATE_FLOORS", "").strip().lower() not in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }, "PMX_DISABLE_GATE_FLOORS must not be set in CI"
+
+        import ast
+
+        constant_names = {
+            "DOMAIN_OBJECTIVE_VERSION",
+            "SYSTEM_OBJECTIVE",
+            "MIN_OMEGA_VS_HURDLE",
+            "MIN_TAKE_PROFIT_FREQUENCY",
+            "TARGET_AMPLITUDE_MULTIPLIER",
+            "TAKE_PROFIT_FILTER_THRESHOLD_FALLBACK",
+        }
+        policy_module = _REPO_ROOT / "etl" / "domain_objective.py"
+        assert policy_module.exists()
+
+        shadow_assignments: list[tuple[str, str]] = []
+        for path in _REPO_ROOT.rglob("*.py"):
+            if path == policy_module:
+                continue
+            try:
+                tree = ast.parse(path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            for node in ast.walk(tree):
+                targets = []
+                if isinstance(node, ast.Assign):
+                    targets = node.targets
+                elif isinstance(node, ast.AnnAssign):
+                    targets = [node.target]
+                for target in targets:
+                    if isinstance(target, ast.Name) and target.id in constant_names:
+                        shadow_assignments.append((str(path), target.id))
+
+        assert not shadow_assignments, f"Shadow TAKE_PROFIT policy constants found: {shadow_assignments}"
+
+    def test_no_production_bypass_or_force_pass_flags(self):
+        import re
+
+        forbidden_patterns = (
+            re.compile(r"PMX_DISABLE_GATE_FLOORS", re.IGNORECASE),
+            re.compile(r"FORCE_PASS", re.IGNORECASE),
+            re.compile(r"DISABLE.*FLOOR", re.IGNORECASE),
+        )
+        scan_roots = [_REPO_ROOT / "scripts", _REPO_ROOT / "bash", _REPO_ROOT / "config"]
+        allowlisted = {_REPO_ROOT / "scripts" / "source_contract_guard.py"}
+        violations: list[str] = []
+        for root in scan_roots:
+            if not root.exists():
+                continue
+            for path in root.rglob("*"):
+                if path in allowlisted:
+                    continue
+                if not path.is_file() or path.suffix.lower() not in {".py", ".sh", ".yml", ".yaml", ".json"}:
+                    continue
+                try:
+                    text = path.read_text(encoding="utf-8")
+                except Exception:
+                    continue
+                for pattern in forbidden_patterns:
+                    if pattern.search(text):
+                        violations.append(str(path))
+                        break
+
+        assert not violations, f"Production bypass / force-pass flags found: {violations}"
 
 
 # ---------------------------------------------------------------------------
@@ -588,8 +689,14 @@ class TestST02AccumulateAlwaysReturnsDbStatus:
         conn = sqlite3.connect(str(db))
         conn.execute(
             "CREATE TABLE trade_executions "
-            "(ts_signal_id TEXT, realized_pnl REAL, is_close INTEGER, "
-            "is_diagnostic INTEGER, is_synthetic INTEGER)"
+            "(ticker TEXT, ts_signal_id TEXT, realized_pnl REAL, exit_reason TEXT, entry_price REAL, "
+            "close_size REAL, shares REAL, holding_period_days INTEGER, effective_horizon INTEGER, "
+            "is_close INTEGER, is_diagnostic INTEGER, is_synthetic INTEGER)"
+        )
+        conn.execute(
+            "CREATE VIEW production_closed_trades AS "
+            "SELECT * FROM trade_executions WHERE is_close = 1 "
+            "AND COALESCE(is_diagnostic, 0) = 0 AND COALESCE(is_synthetic, 0) = 0"
         )
         conn.commit()
         conn.close()

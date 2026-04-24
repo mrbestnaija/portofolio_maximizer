@@ -5,7 +5,13 @@ strategy_optimization:
     ensemble_weight_sarimax:
       type: continuous
       bounds: [0.0, 1.0]
+    ensemble_weight_garch:
+      type: continuous
+      bounds: [0.0, 1.0]
     ensemble_weight_samossa:
+      type: continuous
+      bounds: [0.0, 1.0]
+    ensemble_weight_mssa_rl:
       type: continuous
       bounds: [0.0, 1.0]
     sizing_kelly_fraction_cap:
@@ -27,6 +33,8 @@ strategy_optimization:
   # materially larger than losers.
   objectives:
     total_return: 1.0
+    alpha: 0.25
+    information_ratio: 0.15
     omega_ratio: 0.8
     payoff_asymmetry_effective: 0.6
     profit_factor: 0.5
@@ -35,6 +43,8 @@ strategy_optimization:
 
   objective_thresholds:
     total_return: 0.0
+    alpha: 0.0
+    information_ratio: 0.0
     omega_ratio: 1.0
     payoff_asymmetry_effective: 1.10
     profit_factor: 1.0
@@ -47,9 +57,17 @@ strategy_optimization:
   # when payoff asymmetry is large (p*avg_win > (1-p)*avg_loss). Candidates are
   # evaluated by omega_ratio + payoff_asymmetry + profit_factor, not by
   # directional accuracy.
+  # Anti-barbell bundle: these booleans are hard gates, not scoring inputs.
   constraints:
     min:
       profit_factor: 1.0
+      omega_monotonicity_ok: true
+      omega_cliff_ok: true
+      omega_right_tail_ok: true
+      es_to_edge_bounded: true
+      barbell_path_risk_ok: true
+      regime_realism_ok: true
+      anti_barbell_ok: true
     max:
       max_drawdown: 0.3
 
@@ -57,6 +75,7 @@ strategy_optimization:
     # Shorten the default window so recent trades (e.g., last week) are evaluated
     default_lookback_days: 14
     quant_config_path: config/quant_success_config.yml
+    forecasting_config_path: config/forecasting_config.yml
 
   regimes:
     default:

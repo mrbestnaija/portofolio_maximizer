@@ -27,6 +27,7 @@ import time
 import os
 import shutil
 
+from .env_flags import is_synthetic_mode
 from .timestamp_utils import ensure_utc, utc_now
 
 try:
@@ -149,6 +150,7 @@ class DatabaseManager:
         finally:
             self._schema_initialization_in_progress = False
         self._apply_runtime_sqlite_guardrails()
+        self._mirror_total_changes_baseline = getattr(self.conn, "total_changes", 0)
 
         logger.info(f"Database initialized at: {self.db_path}")
 
@@ -553,6 +555,15 @@ class DatabaseManager:
         if not self._mirror_path.exists():
             self._mirror_path = None
             return
+        if getattr(self, "_mirror_total_changes_baseline", None) is not None:
+            current_changes = getattr(self.conn, "total_changes", 0) if self.conn else 0
+            if current_changes == self._mirror_total_changes_baseline:
+                logger.debug(
+                    "Skipping mirror sync for %s because no write changes were recorded.",
+                    self.db_path,
+                )
+                return
+
         def _quick_check(candidate: Path) -> bool:
             try:
                 conn = guarded_sqlite_connect(
@@ -806,6 +817,7 @@ class DatabaseManager:
                 ticker TEXT NOT NULL,
                 shares INTEGER NOT NULL,
                 entry_price REAL NOT NULL,
+                entry_atr REAL,
                 entry_timestamp TEXT,
                 stop_loss REAL,
                 target_price REAL,
@@ -822,6 +834,8 @@ class DatabaseManager:
         ps_cols = {row["name"] for row in self.cursor.fetchall()}
         if "holding_bars" not in ps_cols:
             self.cursor.execute("ALTER TABLE portfolio_state ADD COLUMN holding_bars INTEGER DEFAULT 0")
+        if "entry_atr" not in ps_cols:
+            self.cursor.execute("ALTER TABLE portfolio_state ADD COLUMN entry_atr REAL")
         if "entry_bar_timestamp" not in ps_cols:
             self.cursor.execute("ALTER TABLE portfolio_state ADD COLUMN entry_bar_timestamp TEXT")
         if "last_bar_timestamp" not in ps_cols:
@@ -862,6 +876,7 @@ class DatabaseManager:
                 realized_pnl REAL,
                 realized_pnl_pct REAL,
                 holding_period_days INTEGER,
+                effective_horizon INTEGER,
                 -- Optional close-trade attribution fields to make win/loss stats auditable.
                 -- These are additive and can be NULL for legacy rows/opening trades.
                 entry_price REAL,
@@ -889,6 +904,8 @@ class DatabaseManager:
                 entry_trade_id INTEGER,
                 -- TS model attribution (Phase 7.13-A2): globally unique signal ID from TimeSeriesSignalGenerator
                 ts_signal_id TEXT,
+                -- Execution-time ticker status snapshot for universe/label provenance.
+                ticker_status_snapshot TEXT,
                 -- Phase 10: forced mechanical exits (stop-loss, max-hold) get is_forced_exit=1
                 -- so Platt calibration can exclude them (they are rule-based, not model predictions).
                 is_forced_exit INTEGER DEFAULT 0,
@@ -964,6 +981,8 @@ class DatabaseManager:
             self.cursor.execute("ALTER TABLE trade_executions ADD COLUMN bar_timestamp TEXT")
         if "exit_reason" not in trade_cols:
             self.cursor.execute("ALTER TABLE trade_executions ADD COLUMN exit_reason TEXT")
+        if "effective_horizon" not in trade_cols:
+            self.cursor.execute("ALTER TABLE trade_executions ADD COLUMN effective_horizon INTEGER")
         # PnL integrity enforcement columns (Phase 7.9+)
         if "is_diagnostic" not in trade_cols:
             self.cursor.execute(
@@ -980,6 +999,10 @@ class DatabaseManager:
         if "entry_trade_id" not in trade_cols:
             self.cursor.execute(
                 "ALTER TABLE trade_executions ADD COLUMN entry_trade_id INTEGER"
+            )
+        if "ticker_status_snapshot" not in trade_cols:
+            self.cursor.execute(
+                "ALTER TABLE trade_executions ADD COLUMN ticker_status_snapshot TEXT"
             )
         if "bar_open" not in trade_cols:
             self.cursor.execute("ALTER TABLE trade_executions ADD COLUMN bar_open REAL")
@@ -1301,6 +1324,7 @@ class DatabaseManager:
                 ticker TEXT NOT NULL,
                 signal_date DATE NOT NULL,
                 signal_timestamp TIMESTAMP,
+                ts_signal_id TEXT,
                 action TEXT NOT NULL CHECK(action IN ('BUY', 'SELL', 'HOLD')),
                 source TEXT NOT NULL CHECK(source IN ('TIME_SERIES', 'LLM', 'HYBRID')),
                 model_type TEXT,
@@ -1331,6 +1355,12 @@ class DatabaseManager:
             CREATE INDEX IF NOT EXISTS idx_trading_signals_ticker_date
             ON trading_signals(ticker, signal_date DESC)
         """)
+        self.cursor.execute("PRAGMA table_info(trading_signals)")
+        trading_signal_cols = {row['name'] for row in self.cursor.fetchall()}
+        if 'ts_signal_id' not in trading_signal_cols:
+            logger.info("Adding ts_signal_id column to trading_signals")
+            self.cursor.execute("ALTER TABLE trading_signals ADD COLUMN ts_signal_id TEXT")
+            self.conn.commit()
 
         # Canonical integrity views (Phase 7.9+)
         self.cursor.execute("""
@@ -2218,6 +2248,8 @@ class DatabaseManager:
         is_close: Optional[bool] = None,
         bar_timestamp: Optional[str] = None,
         exit_reason: Optional[str] = None,
+        effective_horizon: Optional[int] = None,
+        ticker_status_snapshot: Optional[str] = None,
         is_diagnostic: int = 0,
         is_synthetic: int = 0,
         confidence_calibrated: Optional[float] = None,
@@ -2265,6 +2297,8 @@ class DatabaseManager:
                     "is_close",
                     "bar_timestamp",
                     "exit_reason",
+                    "effective_horizon",
+                    "ticker_status_snapshot",
                     "asset_class",
                     "instrument_type",
                     "underlying_ticker",
@@ -2314,6 +2348,8 @@ class DatabaseManager:
                     int(bool(is_close)) if is_close is not None else None,
                     bar_timestamp,
                     exit_reason,
+                    int(effective_horizon) if effective_horizon is not None else None,
+                    ticker_status_snapshot,
                     asset_class,
                     instrument_type,
                     underlying_ticker,
@@ -2408,6 +2444,11 @@ class DatabaseManager:
         Remaining quantity is computed from the effective linkage view so the
         result stays correct for both legacy scalar entry_trade_id closes and
         allocation-aware multi-lot closes.
+
+        Reverse-through-flat close rows are also treated as synthetic opener
+        lots when they carry a non-zero residual position_after.  This keeps
+        the post-reversal side recoverable after restart without requiring a
+        separate opener row in the DB.
         """
         tickers_clean = [str(t).strip().upper() for t in (tickers or []) if str(t).strip()]
         params: List[Any] = []
@@ -2417,7 +2458,18 @@ class DatabaseManager:
             where.append(f"UPPER(o.ticker) IN ({placeholders})")
             params.extend(tickers_clean)
 
-        sql = f"""
+        self.cursor.execute("PRAGMA table_info(trade_executions)")
+        trade_cols = {str(row[1]) for row in self.cursor.fetchall() if len(row) > 1}
+        has_reversal_columns = {"position_before", "position_after"}.issubset(trade_cols)
+
+        link_subquery = """
+            SELECT
+                entry_trade_id,
+                SUM(COALESCE(allocated_shares, 0.0)) AS used_qty
+            FROM trade_close_linkages
+            GROUP BY entry_trade_id
+        """
+        base_sql = f"""
             SELECT
                 o.id,
                 o.ticker,
@@ -2426,23 +2478,46 @@ class DatabaseManager:
                 o.trade_date,
                 o.bar_timestamp,
                 COALESCE(o.is_synthetic, 0) AS is_synthetic,
-                COALESCE(link.used_qty, 0.0) AS used_qty
+                COALESCE(link.used_qty, 0.0) AS used_qty,
+                0 AS source_rank
             FROM trade_executions o
-            LEFT JOIN (
-                SELECT
-                    entry_trade_id,
-                    SUM(COALESCE(allocated_shares, 0.0)) AS used_qty
-                FROM trade_close_linkages
-                GROUP BY entry_trade_id
-            ) link
+            LEFT JOIN ({link_subquery}) link
               ON link.entry_trade_id = o.id
             WHERE {" AND ".join(where)}
-            ORDER BY o.trade_date, o.id
         """
+        sql = base_sql
+        if has_reversal_columns:
+            residual_where = ["COALESCE(c.is_close, 0) = 1", "COALESCE(c.is_diagnostic, 0) = 0"]
+            if tickers_clean:
+                placeholders = ", ".join("?" for _ in tickers_clean)
+                residual_where.append(f"UPPER(c.ticker) IN ({placeholders})")
+            sql += f"""
+            UNION ALL
+            SELECT
+                c.id,
+                c.ticker,
+                c.action,
+                ABS(COALESCE(c.position_after, 0.0)) AS shares,
+                c.trade_date,
+                c.bar_timestamp,
+                COALESCE(c.is_synthetic, 0) AS is_synthetic,
+                COALESCE(link.used_qty, 0.0) AS used_qty,
+                1 AS source_rank
+            FROM trade_executions c
+            LEFT JOIN ({link_subquery}) link
+              ON link.entry_trade_id = c.id
+            WHERE {" AND ".join(residual_where)}
+              AND COALESCE(c.position_before, 0.0) * COALESCE(c.position_after, 0.0) < 0
+            """
+        sql += " ORDER BY trade_date, id, source_rank"
+
+        query_params = list(params)
+        if has_reversal_columns and tickers_clean:
+            query_params.extend(tickers_clean)
 
         lots_by_ticker: Dict[str, List[Dict[str, Any]]] = {}
         try:
-            rows = self.conn.execute(sql, tuple(params)).fetchall()
+            rows = self.conn.execute(sql, tuple(query_params)).fetchall()
         except Exception as exc:
             safe_error = sanitize_error(exc)
             logger.warning("Failed to load open entry lots: %s", safe_error)
@@ -2453,6 +2528,7 @@ class DatabaseManager:
                 trade_id = int(row["id"])
                 total_shares = float(row["shares"] or 0.0)
                 used_qty = float(row["used_qty"] or 0.0)
+                source_rank = int(row["source_rank"] or 0)
             except (KeyError, TypeError, ValueError):
                 continue
             remaining_qty = max(0.0, total_shares - used_qty)
@@ -2469,6 +2545,7 @@ class DatabaseManager:
                     "is_synthetic": int(row["is_synthetic"] or 0),
                     "trade_date": str(row["trade_date"] or "") or None,
                     "bar_timestamp": str(row["bar_timestamp"] or "") or None,
+                    "source_rank": source_rank,
                 }
             )
 
@@ -2536,7 +2613,7 @@ class DatabaseManager:
             "recorded_at": utc_now().isoformat(),
         }
         self.set_metadata("last_run_provenance", payload)
-        if (execution_mode or "").lower() == "synthetic" or (data_source or "").lower() == "synthetic":
+        if is_synthetic_mode(execution_mode=execution_mode, data_source=data_source):
             self.set_metadata("profitability_proof", "false")
             self.set_metadata("profitability_proof_reason", "synthetic_data")
 
@@ -3044,20 +3121,26 @@ class DatabaseManager:
 
             actual_return = signal.get('actual_return')
             backtest_metrics = signal.get('backtest_metrics', {}) or {}
+            ts_signal_id = signal.get('ts_signal_id')
+            if ts_signal_id is None and isinstance(signal.get('signal_id'), str):
+                ts_signal_id = signal.get('signal_id')
+            if ts_signal_id is not None:
+                ts_signal_id = str(ts_signal_id).strip() or None
 
             with self.conn:
                 self.cursor.execute(
                     """
                     INSERT INTO trading_signals
-                    (ticker, signal_date, signal_timestamp, action, source, model_type,
+                    (ticker, signal_date, signal_timestamp, ts_signal_id, action, source, model_type,
                      confidence, entry_price, target_price, stop_loss, expected_return,
                      risk_score, volatility, reasoning, provenance, validation_status,
                      latency_seconds, actual_return, backtest_annual_return, backtest_sharpe,
                      backtest_alpha, backtest_hit_rate, backtest_profit_factor)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(ticker, signal_date, source, model_type)
                     DO UPDATE SET
                         signal_timestamp = COALESCE(excluded.signal_timestamp, trading_signals.signal_timestamp),
+                        ts_signal_id = COALESCE(excluded.ts_signal_id, trading_signals.ts_signal_id),
                         action = excluded.action,
                         confidence = excluded.confidence,
                         entry_price = excluded.entry_price,
@@ -3081,6 +3164,7 @@ class DatabaseManager:
                         ticker,
                         date,
                         signal_timestamp,
+                        ts_signal_id,
                         action,
                         source,
                         model_type or signal.get('model_type'),
@@ -3407,6 +3491,7 @@ class DatabaseManager:
         holding_bars: Optional[dict] = None,
         entry_bar_timestamps: Optional[dict] = None,
         last_bar_timestamps: Optional[dict] = None,
+        entry_atrs: Optional[dict] = None,
     ) -> None:
         """Persist current portfolio state for cross-session continuity.
 
@@ -3414,6 +3499,7 @@ class DatabaseManager:
         and upserts cash balance into portfolio_cash_state.
         """
         holding_bars = holding_bars or {}
+        entry_atrs = entry_atrs or {}
         entry_bar_timestamps = entry_bar_timestamps or {}
         last_bar_timestamps = last_bar_timestamps or {}
 
@@ -3437,15 +3523,16 @@ class DatabaseManager:
                 self.cursor.execute(
                     """
                     INSERT INTO portfolio_state
-                    (ticker, shares, entry_price, entry_timestamp,
+                    (ticker, shares, entry_price, entry_atr, entry_timestamp,
                      stop_loss, target_price, max_holding_days,
                      holding_bars, entry_bar_timestamp, last_bar_timestamp)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         ticker,
                         int(shares),
                         float(entry_prices.get(ticker, 0.0)),
+                        float(entry_atrs.get(ticker)) if entry_atrs.get(ticker) is not None else None,
                         ts_str,
                         stop_losses.get(ticker),
                         target_prices.get(ticker),
@@ -3490,7 +3577,7 @@ class DatabaseManager:
                 return None
 
             self.cursor.execute(
-                "SELECT ticker, shares, entry_price, entry_timestamp, "
+                "SELECT ticker, shares, entry_price, entry_atr, entry_timestamp, "
                 "stop_loss, target_price, max_holding_days, "
                 "holding_bars, entry_bar_timestamp, last_bar_timestamp "
                 "FROM portfolio_state"
@@ -3499,6 +3586,7 @@ class DatabaseManager:
 
             positions = {}
             entry_prices = {}
+            entry_atrs_map = {}
             entry_timestamps_map = {}
             stop_losses = {}
             target_prices_map = {}
@@ -3513,6 +3601,7 @@ class DatabaseManager:
                     ticker = row["ticker"]
                     shares_val = row["shares"]
                     ep = row["entry_price"]
+                    entry_atr_val = row["entry_atr"] if "entry_atr" in row.keys() else None
                     ts_str = row["entry_timestamp"]
                     sl = row["stop_loss"]
                     tp = row["target_price"]
@@ -3530,13 +3619,18 @@ class DatabaseManager:
                     except (KeyError, IndexError):
                         lbt_str = None
                 else:
-                    ticker, shares_val, ep, ts_str, sl, tp, mhd = row[:7]
-                    hb = row[7] if len(row) > 7 else None
-                    ebt_str = row[8] if len(row) > 8 else None
-                    lbt_str = row[9] if len(row) > 9 else None
+                    ticker, shares_val, ep, entry_atr_val, ts_str, sl, tp, mhd = row[:8]
+                    hb = row[8] if len(row) > 8 else None
+                    ebt_str = row[9] if len(row) > 9 else None
+                    lbt_str = row[10] if len(row) > 10 else None
 
                 positions[ticker] = int(shares_val)
                 entry_prices[ticker] = float(ep)
+                if entry_atr_val is not None:
+                    try:
+                        entry_atrs_map[ticker] = float(entry_atr_val)
+                    except Exception:
+                        pass
                 if ts_str:
                     entry_timestamps_map[ticker] = ensure_utc(ts_str) or utc_now()
                 if sl is not None:
@@ -3573,6 +3667,7 @@ class DatabaseManager:
                 "initial_capital": ic_val,
                 "positions": positions,
                 "entry_prices": entry_prices,
+                "entry_atrs": entry_atrs_map,
                 "entry_timestamps": entry_timestamps_map,
                 "stop_losses": stop_losses,
                 "target_prices": target_prices_map,

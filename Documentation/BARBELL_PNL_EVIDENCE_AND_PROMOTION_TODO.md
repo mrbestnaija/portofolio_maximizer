@@ -8,6 +8,9 @@ This document is the **single source of truth** for promoting any barbell sizing
 
 **File**: `reports/barbell_pnl_evidence_latest.json` (recommended default)
 
+The latest file is the operator pointer; immutable history is archived under
+`reports/barbell_pnl_evidence_history/`.
+
 Produced by:
 
 ```bash

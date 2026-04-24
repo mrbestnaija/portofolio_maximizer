@@ -39,6 +39,7 @@ class UnifiedSignal:
     expected_return: Optional[float] = None
     risk_score: Optional[float] = None
     volatility: Optional[float] = None
+    ts_signal_id: Optional[str] = None
 
     # Optional fields (LLM specific)
     llm_model: Optional[str] = None
@@ -86,6 +87,11 @@ class SignalAdapter:
             expected_return=ts_signal.expected_return,
             risk_score=ts_signal.risk_score,
             volatility=ts_signal.volatility,
+            ts_signal_id=(
+                str(ts_signal.signal_id).strip()
+                if getattr(ts_signal, "signal_id", None) is not None and str(ts_signal.signal_id).strip()
+                else None
+            ),
             provenance=ts_signal.provenance.copy() if ts_signal.provenance else {},
             signal_type='TIME_SERIES'
         )
@@ -127,6 +133,9 @@ class SignalAdapter:
             reasoning=llm_signal.get('reasoning', ''),
             llm_model=llm_signal.get('llm_model'),
             fallback=llm_signal.get('fallback', False),
+            ts_signal_id=(
+                str(llm_signal.get('ts_signal_id') or "").strip() or None
+            ),
             provenance={
                 'llm_model': llm_signal.get('llm_model'),
                 'fallback': llm_signal.get('fallback', False),
@@ -157,6 +166,7 @@ class SignalAdapter:
             'entry_price': unified_signal.entry_price,
             'llm_model': unified_signal.llm_model or unified_signal.model_type or 'unknown',
             'fallback': unified_signal.fallback,
+            'ts_signal_id': unified_signal.ts_signal_id,
             # Add Time Series fields if available
             'target_price': unified_signal.target_price,
             'stop_loss': unified_signal.stop_loss,
@@ -183,6 +193,9 @@ class SignalAdapter:
         elif isinstance(signal, dict):
             # Try to detect source
             if signal.get('signal_type') == 'TIME_SERIES' or 'model_type' in signal:
+                raw_ts_signal_id = signal.get('ts_signal_id')
+                if raw_ts_signal_id is None and isinstance(signal.get('signal_id'), str):
+                    raw_ts_signal_id = signal.get('signal_id')
                 # Convert Time Series dict to UnifiedSignal
                 return UnifiedSignal(
                     ticker=signal.get('ticker', ''),
@@ -198,6 +211,9 @@ class SignalAdapter:
                     expected_return=signal.get('expected_return'),
                     risk_score=signal.get('risk_score'),
                     volatility=signal.get('volatility'),
+                    ts_signal_id=(
+                        str(raw_ts_signal_id).strip() if raw_ts_signal_id is not None and str(raw_ts_signal_id).strip() else None
+                    ),
                     provenance=signal.get('provenance', {}),
                     signal_type='TIME_SERIES'
                 )

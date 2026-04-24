@@ -1,0 +1,28 @@
+schema_version: 1
+canonical_sources:
+  - metric: closed_pnl
+    source_file: production_closed_trades
+    query_or_key: production_closed_trades
+  - metric: capital
+    source_file: portfolio_cash_state
+    query_or_key: portfolio_cash_state.initial_capital
+  - metric: open_risk
+    source_file: trade_executions
+    query_or_key: trade_executions WHERE is_close=0
+  - metric: utilization
+    source_file: scripts/compute_capital_utilization.py
+    query_or_key: scripts.compute_capital_utilization.compute_utilization
+  - metric: gate_artifact
+    source_file: logs/audit_gate/production_gate_latest.json
+    query_or_key: logs/audit_gate/production_gate_latest.json
+  - metric: unattended_gate
+    source_file: scripts/institutional_unattended_gate.py
+    query_or_key: scripts/institutional_unattended_gate.py --json
+allowlisted_readers:
+  - scripts/emit_canonical_snapshot.py
+  - scripts/project_runtime_status.py
+  - scripts/institutional_unattended_gate.py
+  - scripts/build_nav_rebalance_plan.py
+  - scripts/build_automation_dashboard.py
+  - scripts/dashboard_db_bridge.py
+  - scripts/pmx_observability_exporter.py
